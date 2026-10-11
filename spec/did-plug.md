@@ -2,6 +2,8 @@
 
 Version 0.1 (draft). Part of the Universal Plug Protocol specification.
 
+Editor: Gor Vogormyan (gor@agi-brain.com)
+
 ## 1. Abstract
 
 `did:plug` identifies an account on a network that is reachable through a Universal Plug Protocol adapter. The identifier names the network and the account; nothing else. There is no registry, no central operator, and no on-ledger DID document: the adapter for the named network resolves the identifier from the network's own state.

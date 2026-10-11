@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately through the repository's **Security → Report a vulnerability** form (GitHub private vulnerability reporting). Do not open a public issue, pull request, or discussion.
+Report vulnerabilities privately by email to **gor@agi-brain.com**, or through the repository's **Security → Report a vulnerability** form (GitHub private vulnerability reporting) where it is enabled. Do not open a public issue, pull request, or discussion.
 
 Include the affected version or commit, the component (core, a signature suite, an adapter), a description of the impact, and a minimal reproduction. Maintainers aim to acknowledge reports within five business days and to agree a disclosure date with the reporter before any public advisory.
 

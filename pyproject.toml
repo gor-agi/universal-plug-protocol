@@ -8,6 +8,8 @@ version = "0.2.0"
 description = "Network-agnostic layer for attestations and identity across public, permissioned, enterprise, and sovereign networks."
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Gor Vogormyan", email = "gor@agi-brain.com" }]
+maintainers = [{ name = "Gor Vogormyan", email = "gor@agi-brain.com" }]
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
