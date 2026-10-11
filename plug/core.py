@@ -29,6 +29,11 @@ class FactType:
     OWNERSHIP_CLAIM = "ownership.claim"
     PREDICTION_MARKET = "prediction.market"
     MONOCULTURE_WARNING = "prediction.monoculture"
+    AGENT_ACTION = "agent.action"
+    AGENT_REVIEW = "agent.review"
+    CONTROL_HALT = "control.halt"
+    CONTROL_RESUME = "control.resume"
+    INCIDENT_REPORT = "incident.report"
 
 ERROR_CODES = {
     "auth_failed": False, "not_found": False, "not_authorized": False,

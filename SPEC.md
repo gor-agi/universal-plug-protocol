@@ -98,6 +98,25 @@ Receipt hash covers spec_version, op, network, subject_hash, fact_type, issuer, 
 
 Attestation meta may carry model_family (open string) and optional model_id. Over the last 20 prediction.market attestations per market, if distinct families divided by window size drops below 0.3, the plug emits one prediction.monoculture warning attestation per market per 24 hours — edge-triggered, not level-triggered. Warning subject hashes include a nonce so each emission is unique; no dedup is expected or required.
 
+## Agent oversight profile
+
+A deployment profile for systems in which AI models act on someone's behalf. It treats every model as a potentially compromised insider: authority over the model sits outside it, and evidence of what it did does not depend on the model. No new operations; it fixes vocabulary and rules.
+
+| fact_type | issued by | records |
+| --- | --- | --- |
+| `agent.action` | the harness that orchestrates the model, never the model | a meaningful action: actor DID, `model_family`, `model_id`, tool, digests of inputs and outputs |
+| `agent.review` | an independent reviewer: a person, or a model of a different family | a judgment on an `agent.action`, referencing its receipt hash in meta |
+| `control.halt`, `control.resume` | an authorized controller | a containment signal for an actor DID |
+| `incident.report` | the operator | a failure or compromise, with what failed and which controls did not hold |
+
+Rules:
+
+1. **Evidence independent of the model.** `agent.action` is signed by a harness key the model cannot use. Verifiers check it against a trust registry of harness keys, so an attestation signed by a model is rejected. Every meaningful action leaves one; the human-readable record stays with the operator, and its hash is anchored.
+2. **Independent review.** An automated `agent.review` is valid only when its reviewer's `model_family` differs from the actor's. No model verifies its own work, and the diversity signal applies across actors and reviewers.
+3. **Containment.** Before each meaningful action, the harness checks the latest `control.halt` and `control.resume` for its actor against the deployment's controller registry, and stops while a valid halt is the most recent. A signal from an issuer outside the registry has no effect.
+4. **Independent rails.** Evidence is anchored on a network the model's operator does not control alone; high-impact actions SHOULD be anchored on more than one.
+5. **Disclosure.** `incident.report` uses salted commitments: the anchor fixes when the disclosure was made, and affected parties receive the fact and the salt.
+
 ## Three layers
 
 1. **Attestations — prove.** Binds what happened. Consumers: agents checking counterparty history, oracles, auditors.
