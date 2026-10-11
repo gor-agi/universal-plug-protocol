@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Contributors to the Universal Plug Protocol project
+// Independent check of spec/vectors/protocol.json, written from SPEC.md with Node's standard library only.
+// Re-derives salted, bridge, and batch commitments, RFC 9162 roots and inclusion proofs, and the reserved
+// commitment domain; verifies Ed25519 and P-256 proofs and issuer binding for did:key.
+// Usage: node spec/vectors/verify_protocol.mjs
+import { createHash, createPublicKey, verify, ECDH } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const vectors = JSON.parse(readFileSync(new URL("./protocol.json", import.meta.url), "utf8"));
+
+const canon = (v) =>
+  v === null || typeof v !== "object"
+    ? JSON.stringify(v)
+    : Array.isArray(v)
+      ? "[" + v.map(canon).join(",") + "]"
+      : "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canon(v[k])).join(",") + "}";
+
+const ALG = { "sha-256": "sha256", "sha3-256": "sha3-256", sm3: "sm3" };
+const H = (alg, ...parts) => {
+  const h = createHash(ALG[alg]);
+  for (const p of parts) h.update(p);
+  return h.digest();
+};
+const hex = (b) => Buffer.from(b).toString("hex");
+const unhex = (s) => Buffer.from(s, "hex");
+
+const factBytes = (f) =>
+  "json" in f ? Buffer.from(canon(f.json), "utf8") : "hex" in f ? unhex(f.hex) : Buffer.from(f.text, "utf8");
+
+// RFC 9162 section 2.1.1
+const leafHash = (alg, leaf) => H(alg, Buffer.from([0]), leaf);
+const nodeHash = (alg, l, r) => H(alg, Buffer.from([1]), l, r);
+const split = (n) => { let k = 1; while (k * 2 < n) k *= 2; return k; };
+const mth = (alg, leaves) =>
+  leaves.length === 0 ? H(alg, Buffer.alloc(0))
+    : leaves.length === 1 ? leafHash(alg, leaves[0])
+      : nodeHash(alg, mth(alg, leaves.slice(0, split(leaves.length))), mth(alg, leaves.slice(split(leaves.length))));
+
+// RFC 9162 section 2.1.3.2
+const verifyInclusion = (alg, leaf, index, size, path, root) => {
+  if (!(index >= 0 && index < size)) return false;
+  let fn = BigInt(index), sn = BigInt(size - 1), r = leaf;
+  for (const p of path) {
+    if (sn === 0n) return false;
+    if ((fn & 1n) === 1n || fn === sn) {
+      r = nodeHash(alg, p, r);
+      while ((fn & 1n) === 0n && fn !== 0n) { fn >>= 1n; sn >>= 1n; }
+    } else {
+      r = nodeHash(alg, r, p);
+    }
+    fn >>= 1n; sn >>= 1n;
+  }
+  return sn === 0n && r.equals(root);
+};
+
+// did:key: base58btc multibase, unsigned-varint multicodec prefix
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const b58decode = (s) => {
+  let n = 0n;
+  for (const c of s) {
+    const i = B58.indexOf(c);
+    if (i < 0) throw new Error("not base58btc");
+    n = n * 58n + BigInt(i);
+  }
+  let h = n === 0n ? "" : n.toString(16);
+  if (h.length % 2) h = "0" + h;
+  return Buffer.concat([Buffer.alloc(s.length - s.replace(/^1+/, "").length), unhex(h)]);
+};
+const MULTICODEC = { ed25519: [0xed, 0x01], "ecdsa-p256": [0x80, 0x24] };
+const parseDidKey = (did) => {
+  const base = did.split("#")[0];
+  if (!base.startsWith("did:key:z")) throw new Error("not a did:key");
+  const raw = b58decode(base.slice("did:key:z".length));
+  for (const [alg, prefix] of Object.entries(MULTICODEC)) {
+    if (raw[0] === prefix[0] && raw[1] === prefix[1]) return [alg, raw.subarray(2)];
+  }
+  throw new Error("unsupported multicodec");
+};
+const b64u = (b) => Buffer.from(b).toString("base64url");
+const publicKey = (alg, raw) => {
+  if (alg === "ed25519") return createPublicKey({ format: "jwk", key: { kty: "OKP", crv: "Ed25519", x: b64u(raw) } });
+  const xy = ECDH.convertKey(raw, "prime256v1", undefined, undefined, "uncompressed");
+  return createPublicKey({ format: "jwk", key: { kty: "EC", crv: "P-256", x: b64u(xy.subarray(1, 33)), y: b64u(xy.subarray(33)) } });
+};
+
+// A proof is valid when the signature over the 32-byte subject hash verifies under the verification
+// method's key and the issuer DID names that same key (SPEC.md, Signature suites).
+const proofValid = (subjectHash, issuer, proof) => {
+  try {
+    const msg = unhex(subjectHash);
+    if (msg.length !== 32 || hex(msg) !== subjectHash.toLowerCase()) return false;
+    const [keyAlg, raw] = parseDidKey(proof.verification_method);
+    if (keyAlg !== proof.alg) return false;
+    const sig = unhex(proof.sig.replace(/^0x/, ""));
+    const key = publicKey(keyAlg, raw);
+    const ok = keyAlg === "ed25519"
+      ? verify(null, msg, key, sig)
+      : verify("sha256", msg, { key, dsaEncoding: "ieee-p1363" }, sig);
+    return ok && issuer.split("#")[0] === proof.verification_method.split("#")[0];
+  } catch {
+    return false;
+  }
+};
+
+let failures = 0, checks = 0;
+const expect = (cond, what) => { checks++; if (!cond) { failures++; console.error("FAIL", what); } };
+
+for (const v of vectors.salted) {
+  const fb = factBytes(v.fact);
+  expect(hex(H(v.hash_alg, fb)) === v.plain, `salted plain ${v.hash_alg} ${JSON.stringify(v.fact)}`);
+  expect(hex(H(v.hash_alg, unhex(v.salt), fb)) === v.subject_hash, `salted commitment ${v.hash_alg} ${JSON.stringify(v.fact)}`);
+}
+
+for (const v of vectors.bridge) {
+  const c = H(v.hash_alg, Buffer.from(canon({ "plug.bridge": v.source }), "utf8"));
+  expect(hex(c) === v.commitment, `bridge ${v.hash_alg} ${v.source.address}`);
+}
+
+for (const b of vectors.batches) {
+  const label = `batch ${b.hash_alg} ${b.commitment} size ${b.size}`;
+  const subjects = b.facts.map((f, i) =>
+    b.salts ? H(b.hash_alg, unhex(b.salts[i]), factBytes(f)) : H(b.hash_alg, factBytes(f)));
+  expect(subjects.every((s, i) => hex(s) === b.subjects[i]), `${label}: subjects`);
+  const root = mth(b.hash_alg, subjects);
+  expect(hex(root) === b.root && b.size === subjects.length, `${label}: root`);
+  const bc = H(b.hash_alg, Buffer.from(canon({ "plug.batch": { root: b.root, size: b.size } }), "utf8"));
+  expect(hex(bc) === b.batch_commitment, `${label}: batch commitment`);
+  b.inclusion.forEach((inc, i) => expect(
+    inc.index === i && verifyInclusion(b.hash_alg, leafHash(b.hash_alg, subjects[i]), inc.index, b.size, inc.path.map(unhex), root),
+    `${label}: inclusion ${i}`));
+}
+
+for (const v of vectors.inclusion_negative) {
+  const ok = verifyInclusion(v.hash_alg, leafHash(v.hash_alg, unhex(v.subject_hash)), v.index, v.size, v.path.map(unhex), unhex(v.root));
+  expect(!ok, `inclusion negative: ${v.case}`);
+}
+
+for (const v of vectors.proofs) {
+  expect(proofValid(v.subject_hash, v.issuer, v.proof) === v.valid, `proof ${v.proof.alg}: ${v.case}`);
+}
+
+for (const v of vectors.reserved) {
+  const refused = factBytes(v.fact).subarray(0, 7).equals(Buffer.from('{"plug.', "utf8"));
+  expect(refused === v.refused, `reserved domain: ${JSON.stringify(v.fact)}`);
+}
+
+if (failures) {
+  console.error(`protocol vectors: ${failures} of ${checks} checks failed`);
+  process.exit(1);
+}
+console.log(`vectors: protocol.json verified independently (${checks} checks)`);

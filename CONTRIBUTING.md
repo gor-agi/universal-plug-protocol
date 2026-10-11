@@ -35,6 +35,8 @@ Cross-implementation checks run when the tools are present: OpenSSL 3 for signat
 
 ```bash
 node spec/vectors/generate_jcs.mjs > spec/vectors/jcs.json
+python spec/vectors/generate_protocol.py > spec/vectors/protocol.json
+scripts/check_vectors.sh
 ```
 
 ## Pull requests

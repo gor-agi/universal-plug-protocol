@@ -67,3 +67,18 @@ def test_jcs_random_doubles_match_node():
     mismatches = [(b, s, canonical(from_bits(b))) for b, s in pairs if canonical(from_bits(b)) != s]
     assert not mismatches, mismatches[:5]
     assert len(pairs) > 19000
+
+
+def test_protocol_vectors_reproduce():
+    pytest.importorskip("Crypto", reason="protocol vectors sign with Ed25519 and P-256")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("generate_protocol", os.path.join(VECTORS, "generate_protocol.py"))
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert gen.build() == load("protocol.json"), "regenerate: python spec/vectors/generate_protocol.py > spec/vectors/protocol.json"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_protocol_vectors_verify_in_node():
+    out = subprocess.run(["node", os.path.join(VECTORS, "verify_protocol.mjs")], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr

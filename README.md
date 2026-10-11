@@ -52,7 +52,7 @@ An explicit network is required when there is no open session. Prove hashes `byt
 
 - [SPEC.md](SPEC.md) — operations, payload schemas, canonical form, signature suites, the error model, session rules, the idempotency invariant, and bridge verification.
 - [spec/did-plug.md](spec/did-plug.md) — the `did:plug` method.
-- [spec/vectors/](spec/vectors/) — language-neutral conformance vectors.
+- [spec/vectors/](spec/vectors/) — language-neutral conformance vectors, with an independent Node verifier for commitments, batch inclusion proofs, and Ed25519 and P-256 proofs.
 
 ## Project
 
