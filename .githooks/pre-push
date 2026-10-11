@@ -1,0 +1,35 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Blocks a push to main unless the commits are signed off and the CI checks pass locally.
+# Bypass for an emergency only: git push --no-verify
+set -e
+zero=0000000000000000000000000000000000000000
+pushes_main=
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/main" ] || continue
+  [ "$local_sha" = "$zero" ] && continue
+  pushes_main=1
+  if [ "$remote_sha" = "$zero" ]; then range="$local_sha"; else range="$remote_sha..$local_sha"; fi
+  for c in $(git rev-list "$range"); do
+    if ! git show -s --format=%B "$c" | grep -q "^Signed-off-by: "; then
+      echo "pre-push: commit $(git rev-parse --short "$c") has no Signed-off-by (see CONTRIBUTING.md)" >&2
+      exit 1
+    fi
+  done
+done
+[ -n "$pushes_main" ] || exit 0
+
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "pre-push: uncommitted changes would be tested instead of what is pushed; commit or stash them" >&2
+  exit 1
+fi
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+py=python3; [ -x .venv/bin/python ] && py=.venv/bin/python
+echo "pre-push: running tests" >&2
+"$py" -m pytest -q -x -p no:cacheprovider >&2
+if command -v node >/dev/null 2>&1; then
+  scripts/check_vectors.sh >&2
+else
+  echo "pre-push: node not found; cross-implementation checks skipped (CI runs them)" >&2
+fi

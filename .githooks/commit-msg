@@ -1,0 +1,7 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Adds the DCO Signed-off-by trailer for the configured author when it is missing.
+name=$(git config user.name) email=$(git config user.email)
+[ -n "$name" ] && [ -n "$email" ] || { echo "commit-msg: set git user.name and user.email" >&2; exit 1; }
+git interpret-trailers --in-place --if-exists addIfDifferent \
+  --trailer "Signed-off-by: $name <$email>" "$1"

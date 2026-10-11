@@ -27,7 +27,7 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev,live,suites,mcp]"
       - name: Check vectors are reproducible
-        run: node spec/vectors/generate_jcs.mjs | python -c "import json,sys; a=json.load(sys.stdin); b=json.load(open('spec/vectors/jcs.json')); a.pop('generator'); b.pop('generator'); sys.exit(a != b)"
+        run: scripts/check_vectors.sh
       - name: Run tests with coverage
         run: |
           openssl version

@@ -25,10 +25,13 @@ The sign-off name and email match the commit author. Pull requests with unsigned
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,live,suites]"
+git config core.hooksPath .githooks
 pytest -rs
 ```
 
-Cross-implementation checks run when the tools are present: OpenSSL 3 for signature suites, Node.js for RFC 8785 vectors. CI installs both. To regenerate vectors:
+The hooks in `.githooks/` add your `Signed-off-by` line to each commit, and before a push to `main` they refuse unsigned commits and run the test suite and `scripts/check_vectors.sh`. Use `git push --no-verify` only in an emergency; CI runs the same checks.
+
+Cross-implementation checks run when the tools are present: OpenSSL 3 for signature suites, Node.js for RFC 8785 vectors and `scripts/check_vectors.sh`. CI installs both. To regenerate vectors:
 
 ```bash
 node spec/vectors/generate_jcs.mjs > spec/vectors/jcs.json
