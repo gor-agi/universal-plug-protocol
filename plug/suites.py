@@ -17,6 +17,7 @@ Each suite needs its optional library: eth-account (secp256k1), cryptography
 unsupported_op; nothing is emulated.
 """
 from __future__ import annotations
+import hashlib
 import re
 import secrets
 from typing import Optional
@@ -355,8 +356,10 @@ def verify(subject_hash: str, proof: dict) -> tuple[bool, str]:
     return (True, method.split("#", 1)[0]) if good else (False, "proof_invalid: bad signature")
 
 
-# JOSE algorithms for JWS made by did:key holders (RFC 7518 ES256, RFC 8037 EdDSA).
-_JOSE = {"ES256": ("ecdsa-p256", _p256_verify), "EdDSA": ("ed25519", _ed_verify)}
+# JOSE algorithms for JWS made by did:key holders: ES256 (RFC 7518), Ed25519 (RFC 9864, fully specified)
+# and EdDSA (RFC 8037, deprecated by RFC 9864 but still issued).
+_JOSE = {"ES256": ("ecdsa-p256", _p256_verify), "Ed25519": ("ed25519", _ed_verify),
+         "EdDSA": ("ed25519", _ed_verify)}
 
 
 def verify_jws(signing_input: bytes, signature: bytes, jose_alg: str, method: str) -> bool:
@@ -369,6 +372,74 @@ def verify_jws(signing_input: bytes, signature: bytes, jose_alg: str, method: st
     except ValueError:
         return False
     return key_alg == suite[0] and suite[1](signing_input, signature, public)
+
+
+# ---- signers: where a private key lives ----
+
+class KeySigner:
+    """Signs with a private key held in this process (development, tests, low-risk deployments)."""
+
+    def __init__(self, alg: str, private_key: str):
+        self.alg, self._key = alg, private_key
+        self.verification_method = sign(alg, private_key, "00" * 32)["verification_method"]
+
+    def sign(self, message: bytes) -> dict:
+        return sign(self.alg, self._key, message.hex())
+
+
+class Pkcs11Signer:
+    """Signs with a key that never leaves a PKCS#11 token (an HSM, or SoftHSM in development).
+
+    Supports ecdsa-p256 (CKM_ECDSA over SHA-256 of the 32-byte message) and ed25519 (CKM_EDDSA, PureEdDSA).
+    The token holds a key pair under key_label; its public key gives the did:key verification method.
+    """
+
+    _ALGS = ("ecdsa-p256", "ed25519")
+
+    def __init__(self, library: str, token_label: str, pin: str, key_label: str, alg: str):
+        pkcs11 = _require("pkcs11", alg)
+        if alg not in self._ALGS:
+            raise PlugError("unsupported_op", f"PKCS#11 signing supports {', '.join(self._ALGS)}")
+        self.alg = alg
+        token = pkcs11.lib(library).get_token(token_label=token_label)
+        self._session = token.open(user_pin=pin)
+        self._key = self._session.get_key(object_class=pkcs11.ObjectClass.PRIVATE_KEY, label=key_label)
+        point = self._session.get_key(object_class=pkcs11.ObjectClass.PUBLIC_KEY, label=key_label)[
+            pkcs11.Attribute.EC_POINT]
+        raw = _der_octet_string(point)
+        if alg == "ecdsa-p256":
+            ec, _ = _ec()
+            ser = _require("cryptography.hazmat.primitives.serialization", alg)
+            raw = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw).public_bytes(
+                ser.Encoding.X962, ser.PublicFormat.CompressedPoint)
+        self.verification_method = did_key(alg, raw)
+        self._mechanism = pkcs11.Mechanism.ECDSA if alg == "ecdsa-p256" else pkcs11.Mechanism.EDDSA
+
+    def sign(self, message: bytes) -> dict:
+        _message(message.hex())
+        data = hashlib.sha256(message).digest() if self.alg == "ecdsa-p256" else message
+        sig = self._key.sign(data, mechanism=self._mechanism)
+        return {"alg": self.alg, "sig": "0x" + bytes(sig).hex(), "verification_method": self.verification_method}
+
+    def close(self) -> None:
+        self._session.close()
+
+
+def _der_octet_string(value: bytes) -> bytes:
+    """CKA_EC_POINT is a DER OCTET STRING around the encoded point (some tokens omit the wrapper)."""
+    value = bytes(value)
+    if len(value) > 2 and value[0] == 0x04 and value[1] == len(value) - 2 and value[1] < 0x80:
+        return value[2:]
+    if len(value) > 3 and value[0] == 0x04 and value[1] == 0x81 and value[2] == len(value) - 3:
+        return value[3:]
+    return value
+
+
+def sign_attestation(signer, att) -> dict:
+    """Sign an attestation's statement with any signer (KeySigner, Pkcs11Signer) and set its proof."""
+    from .core import statement_hash
+    att.proof = signer.sign(bytes.fromhex(statement_hash(att)))
+    return att.proof
 
 
 def parse_account_did(did: str) -> Optional[tuple[str, str]]:

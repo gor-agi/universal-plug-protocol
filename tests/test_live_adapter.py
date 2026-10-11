@@ -10,6 +10,7 @@ from eth_account import Account
 from hexbytes import HexBytes
 from web3.datastructures import AttributeDict
 
+from plug import ANY
 from plug.adapters.live import LiveAdapter, sign_subject
 from dataclasses import replace
 
@@ -94,7 +95,7 @@ BOB = Account.create().key.hex()
 
 def setup(*keys):
     w3 = _FakeW3()
-    p = Plug()
+    p = Plug(trust={"sepolia": ANY})
     adapter = LiveAdapter(w3=w3)
     p.register_adapter("sepolia", adapter)
     sessions = [p.open("sepolia", {"scheme": "raw", "material": k}) for k in keys]
@@ -216,7 +217,7 @@ def test_reverted_anchor_carries_no_proof():
 
 
 def two_chains():
-    p = Plug()
+    p = Plug(trust={"chain-a": ANY, "chain-b": ANY})
     a, b = LiveAdapter(w3=_FakeW3()), LiveAdapter(w3=_FakeW3())
     p.register_adapter("chain-a", a)
     p.register_adapter("chain-b", b)
@@ -283,4 +284,55 @@ def test_ledger_record_that_is_not_a_registry_restricts_nothing_so_it_is_rejecte
     attacker = p.prove(b"self-signed claim", "doc.sha256")
     v = p.check(Attestation.from_receipt(attacker), trust_registry=operator_tx)
     assert v["valid"] is False and "issuers must be a non-empty list" in v["receipt"].error
+
+
+class _Mirror:
+    """Another endpoint reading the same chain; `tamper` rewrites what it reports."""
+
+    def __init__(self, source, tamper=None):
+        outer = self
+
+        class Eth:
+            def __getattr__(self, name):
+                return getattr(source.eth, name)
+
+            def get_transaction(self, tx_hash):
+                tx = source.eth.get_transaction(tx_hash)
+                return tamper(tx) if tamper else tx
+
+            @property
+            def block_number(self):
+                return source.eth.block_number - outer.lag
+
+        self.lag = 0
+        self.eth = Eth()
+
+
+def test_reads_must_agree_across_endpoints():
+    w3 = _FakeW3()
+    honest, liar = _Mirror(w3), _Mirror(w3, tamper=lambda tx: AttributeDict(dict(tx, input=HexBytes("0x" + "00" * 32))))
+    p = Plug(trust={"sepolia": ANY})
+    p.register_adapter("sepolia", LiveAdapter(w3=w3, readers=[honest]))
+    p.open("sepolia", {"scheme": "raw", "material": ALICE})
+    r = p.prove(b"quorum", "doc.sha256")
+    assert p.check(Attestation.from_receipt(r))["valid"] is True
+
+    lied_to = Plug(trust={"sepolia": ANY})
+    lied_to.register_adapter("sepolia", LiveAdapter(w3=w3, readers=[liar]))
+    v = lied_to.check(Attestation.from_receipt(r), network="sepolia")
+    assert v["valid"] is False and "read endpoints disagree" in v["receipt"].error
+
+    honest.lag = 5
+    q = p.check(r.state_ref)["receipt"].data["finality"]
+    assert q["confirmations"] == max(w3.eth.block_number - r.data["block"] + 1 - 5, 0), "the weakest view wins"
+
+
+def test_nothing_signs_without_a_session():
+    p = Plug()
+    p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3(), private_key=ALICE))
+    with pytest.raises(PlugError) as e:
+        p.prove(b"anonymous", "doc.sha256", network="sepolia")
+    assert e.value.code == "auth_failed"
+    p.open("sepolia", {"scheme": "raw"})  # opening a session is the consent to use the configured key
+    assert p.prove(b"consented", "doc.sha256").status == Status.OK
 

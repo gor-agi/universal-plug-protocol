@@ -117,3 +117,38 @@ def test_status_list_draft_appendix_c():
         want = {int(k): s for k, s in v["statuses"].items()}
         nonzero = {i: status_at(bits, array, i) for i in range(v["size"]) if status_at(bits, array, i)}
         assert nonzero == {i: s for i, s in want.items() if s}, v["section"]
+
+
+def test_wycheproof_ecdsa_secp256k1_through_ethereum_recovery():
+    """Our secp256k1 suite recovers the signer's address; a valid signature recovers it with one recovery id, an
+    invalid one with neither. Wycheproof's DER signatures are converted to r||s||v for that check."""
+    pytest.importorskip("eth_keys")
+    import hashlib
+    from eth_keys import keys
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    from plug.suites import _k1_verify
+    doc = _wycheproof("ecdsa_secp256k1_sha256_test.json")
+    n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    mismatches = []
+    for group in doc["testGroups"]:
+        address = keys.PublicKey(bytes.fromhex(group["publicKey"]["uncompressed"])[1:]).to_checksum_address()
+        for t in group["tests"]:
+            digest32 = hashlib.sha256(bytes.fromhex(t["msg"])).digest()
+            try:
+                r, s = decode_dss_signature(bytes.fromhex(t["sig"]))
+                ok = 0 < r < n and 0 < s < n and any(
+                    _k1_verify(digest32, r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([v]), address)[0]
+                    for v in (0, 1))
+            except (ValueError, OverflowError):
+                ok = False  # not DER, or r/s wider than 32 bytes: no Ethereum signature can carry it
+            if (t["result"] == "valid") != ok and t["result"] != "acceptable":
+                mismatches.append((t["tcId"], t["result"], t["comment"]))
+    # Ethereum's v carries only the parity of R.y (recovery id 0 or 1). A signature whose R.x is r + n needs
+    # recovery id 2 or 3, which no Ethereum signature can express; honest signers hit it with probability ~2^-128.
+    unrepresentable = {350, 471}
+    assert {m[0] for m in mismatches} == unrepresentable, mismatches[:10]
+    for group in doc["testGroups"]:
+        for t in group["tests"]:
+            if t["tcId"] in unrepresentable:
+                r, _ = decode_dss_signature(bytes.fromhex(t["sig"]))
+                assert r + n < 2**256 - 2**32 - 977, "R.x = r + n is a field element only for small r"

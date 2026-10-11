@@ -1,18 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the Universal Plug Protocol project
-"""Universal Plug Protocol core v0.3.0 - network-agnostic attestation and identity interface.
+"""Universal Plug Protocol core v0.4.0 - network-agnostic attestation and identity interface.
 All network-specific logic lives in adapters. This module never imports
 network SDKs or references any specific backend.
 """
 from __future__ import annotations
-import copy, hashlib, json, time, secrets
+import copy, hashlib, json, logging, time, secrets
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-SPEC_VERSION = "0.3.0"
+SPEC_VERSION = "0.4.0"
+
+# The one explicit way to open a permission: trust any authentic issuer, fetch from any public host, or let a
+# model prove any non-reserved fact type. Never a default; every use is logged.
+ANY = "ANY"
+_POLICY_LOG = logging.getLogger("plug.policy")
 
 class Status(str, Enum):
     OK, PENDING, REJECTED, ERROR = "ok", "pending", "rejected", "error"
@@ -315,31 +320,37 @@ def merkle_leaf_hash(leaf: bytes, hash_alg: str = "sha-256") -> bytes:
     return _h(b"\x00" + leaf, hash_alg)
 
 
-def _split(n: int) -> int:
-    k = 1
-    while k * 2 < n:
-        k *= 2
-    return k
+def merkle_levels(leaves: list, hash_alg: str = "sha-256") -> list[list[bytes]]:
+    """Every level of the RFC 9162 tree over raw leaf inputs, leaves first. Pairing bottom-up and carrying an
+    unpaired last node up a level yields the same left-balanced tree as MTH (section 2.1.1), in O(n)."""
+    level = [merkle_leaf_hash(leaf, hash_alg) for leaf in leaves]
+    levels = [level]
+    while len(level) > 1:
+        level = [_h(b"\x01" + level[i] + level[i + 1], hash_alg) for i in range(0, len(level) - 1, 2)] \
+            + ([level[-1]] if len(level) % 2 else [])
+        levels.append(level)
+    return levels
 
 
 def merkle_root(leaves: list, hash_alg: str = "sha-256") -> bytes:
     """MTH(D[n]) of RFC 9162 section 2.1.1 over raw leaf inputs."""
-    if not leaves:
-        return _h(b"", hash_alg)
-    if len(leaves) == 1:
-        return merkle_leaf_hash(leaves[0], hash_alg)
-    k = _split(len(leaves))
-    return _h(b"\x01" + merkle_root(leaves[:k], hash_alg) + merkle_root(leaves[k:], hash_alg), hash_alg)
+    return merkle_levels(leaves, hash_alg)[-1][0] if leaves else _h(b"", hash_alg)
+
+
+def merkle_path_from_levels(index: int, levels: list[list[bytes]]) -> list:
+    """PATH(m, D[n]) of RFC 9162 section 2.1.3.1 from precomputed levels: sibling hashes from the leaf up."""
+    path = []
+    for level in levels[:-1]:
+        sibling = index ^ 1
+        if sibling < len(level):
+            path.append(level[sibling])
+        index //= 2
+    return path
 
 
 def merkle_path(index: int, leaves: list, hash_alg: str = "sha-256") -> list:
     """PATH(m, D[n]) of RFC 9162 section 2.1.3.1: sibling hashes from the leaf up."""
-    if len(leaves) <= 1:
-        return []
-    k = _split(len(leaves))
-    if index < k:
-        return merkle_path(index, leaves[:k], hash_alg) + [merkle_root(leaves[k:], hash_alg)]
-    return merkle_path(index - k, leaves[k:], hash_alg) + [merkle_root(leaves[:k], hash_alg)]
+    return merkle_path_from_levels(index, merkle_levels(leaves, hash_alg))
 
 
 def merkle_verify_inclusion(leaf_hash: bytes, index: int, size: int, path: list, root: bytes,
@@ -440,8 +451,10 @@ class Plug:
 
     hash_alg is deployment configuration: a profile that mandates SM3 or SHA3 sets it here, not in core.
     commitment="salted" anchors H(salt || fact) with a fresh salt returned only to the caller; use it for personal data.
+    trust maps a network to the operator's trust policy: a trust registry (inline, URL, or StateRef) or ANY.
+    Closed by default: verify on a network without a policy is rejected.
     """
-    def __init__(self, hash_alg: str = "sha-256", commitment: str = "plain"):
+    def __init__(self, hash_alg: str = "sha-256", commitment: str = "plain", trust: Optional[dict] = None):
         digest(b"", hash_alg)  # fail at construction if the profile's algorithm is unavailable
         if commitment not in ("plain", "salted"):
             raise ValueError("commitment must be 'plain' or 'salted'")
@@ -455,6 +468,18 @@ class Plug:
         self._batch_salts: dict[str, tuple] = {}  # salted batch key -> (salts, timestamp); memory only
         self._pred_window: dict[str, list] = {}    # market -> [(family, ts)]
         self._mono_warned: dict[str, float] = {}  # market -> last warning timestamp (24h cooldown)
+        self._trust: dict[str, Any] = {}
+        for network, policy in (trust or {}).items():
+            self.trust(network, policy)
+
+    def trust(self, network: str, policy: Any) -> None:
+        """Set the operator's trust policy for a network: a trust registry, or ANY to accept any authentic issuer."""
+        url = isinstance(policy, str) and policy.startswith(("http://", "https://"))
+        if not (policy == ANY or url or isinstance(policy, (dict, StateRef))):
+            raise ValueError("trust policy is a registry (dict, http(s) URL, or StateRef) or ANY")
+        if policy == ANY:
+            _POLICY_LOG.warning("trust on %s opened to ANY authentic issuer", network)
+        self._trust[network] = policy
 
     def register_adapter(self, name: str, adapter: Adapter):
         self._adapters[name] = adapter
@@ -556,7 +581,8 @@ class Plug:
                 cached = self._idempotency[h][0]
                 return Receipt(cached.spec_version, cached.op, cached.status, cached.network,
                                cached.state_ref, copy.deepcopy(cached.data), cached.error, seq=seq)
-            r = self._adapter(net).attest(net, att)
+            # Signing adapters sign only for the session open on this network, never for an issuer named by the caller.
+            r = self._bind(self._adapter(net), net).attest(net, att)
             r.seq = seq
             r.data = dict(r.data)  # adapters may log the same dict; caller-only fields must not reach it
             # Hash inputs travel on the receipt so receipt_hash() can be computed for any adapter.
@@ -608,7 +634,7 @@ class Plug:
             if err:
                 return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
         if att.inclusion is None:
-            return self._adapter(net).verify(att, net, trust_registry)
+            return self._verify_trusted(att, net, trust_registry)
         root, err = _inclusion_root(att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
@@ -621,10 +647,26 @@ class Plug:
         # The signed batch statement: same issuer, time, and meta, typed plug.batch, naming the member type.
         batch = replace(att, subject_hash=anchored, fact_type="plug.batch", inclusion=None,
                         meta=dict(att.meta, batch_size=size, batch_fact_type=att.fact_type))
-        r = self._adapter(net).verify(batch, net, trust_registry)
+        r = self._verify_trusted(batch, net, trust_registry)
         data = dict(r.data, subject_hash=att.subject_hash, batch_root=root, batch_commitment=anchored,
                     leaf_index=int(att.inclusion["index"]), batch_size=size)
         return Receipt(r.spec_version, r.op, r.status, r.network, r.state_ref, data, r.error, r.seq)
+
+    def _verify_trusted(self, att: Attestation, net: str, trust_registry=None) -> Receipt:
+        """The adapter's verdict under every policy that applies: the operator's, then the caller's, which can
+        only narrow it. With neither, and no trust of the adapter's own, verification is closed."""
+        adapter = self._adapter(net)
+        operator = self._trust.get(net)
+        registries = [r for r in (None if operator == ANY else operator, trust_registry) if r is not None]
+        if not registries and operator != ANY and not getattr(adapter, "trust_policy", False):
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
+                           error=f"not_authorized: no trust policy for {net} (closed by default)")
+        result = None
+        for registry in registries or [None]:
+            result = adapter.verify(att, net, registry)
+            if result.status != Status.OK:
+                return result
+        return result
 
     def _bind(self, adapter: Adapter, network: str) -> Adapter:
         s = self.active()
@@ -703,7 +745,8 @@ class Plug:
             salts = list(cached[0]) if cached else [secrets.token_bytes(32).hex() for _ in facts]
         subjects = [commitment(f, s, self.hash_alg) if s else p for f, s, p in zip(facts, salts, plains)]
         leaves = [bytes.fromhex(s) for s in subjects]
-        root = merkle_root(leaves, self.hash_alg).hex()
+        levels = merkle_levels(leaves, self.hash_alg)
+        root = levels[-1][0].hex()
         batch = Attestation(subject_hash=batch_commitment(root, len(leaves), self.hash_alg),
                             fact_type="plug.batch", issuer=issuer,
                             issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -720,7 +763,7 @@ class Plug:
                     "proof": dict(r.data.get("proof") or {}), "batch_root": root,
                     "batch_commitment": batch.subject_hash,
                     "inclusion": {"tree": "rfc9162", "index": i, "size": len(subjects), "root": root,
-                                  "path": [p.hex() for p in merkle_path(i, leaves, self.hash_alg)]}}
+                                  "path": [p.hex() for p in merkle_path_from_levels(i, levels)]}}
             if salts[i]:
                 data["salt"] = salts[i]
             receipts.append(Receipt(SPEC_VERSION, "attest", r.status, r.network, r.state_ref, data, r.error, r.seq))

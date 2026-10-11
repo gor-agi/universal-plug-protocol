@@ -2,12 +2,13 @@
 # Copyright Contributors to the Universal Plug Protocol project
 """Plug core tests - in-memory, no network. Public surfaces only."""
 import time
+from plug import ANY
 from plug.core import (Plug, Attestation, Identity, StateRef, Status, Role, FactType,
                   PlugError, sha256_hex, Receipt, Session, canonical)
 from plug.adapters.stub import StubAdapter
 
 def setup():
-    p = Plug()
+    p = Plug(trust={"testnet": ANY})
     p.register_adapter("testnet", StubAdapter())
     p.open("testnet", {"scheme": "raw", "material": "test-key-1", "subject": "alice"})
     return p
@@ -136,7 +137,7 @@ def test_prove_hashes_raw_bytes():
 def test_spec_version_matches_package():
     from plug import __version__
     from plug.core import SPEC_VERSION
-    assert SPEC_VERSION == "0.3.0" and __version__.rsplit(".", 1)[0] == SPEC_VERSION.rsplit(".", 1)[0]
+    assert SPEC_VERSION == "0.4.0" and __version__.rsplit(".", 1)[0] == SPEC_VERSION.rsplit(".", 1)[0]
 
 def test_seq_cleared_when_attest_fails():
     class Boom(StubAdapter):

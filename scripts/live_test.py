@@ -30,6 +30,7 @@ def main():
     # 1. Connect / open session
     sess = plug.open("sepolia", {"scheme": "raw", "material": os.environ["SEPOLIA_PRIVATE_KEY"],
                                  "subject": adapter.address})
+    plug.trust("sepolia", {"issuers": [plug.active().credential_subject]})  # closed by default: trust our own key only
     print(f"session: {sess}")
     print(f"wallet:  {adapter.address}")
     print(f"balance: {adapter.w3.eth.get_balance(adapter.address)} wei")

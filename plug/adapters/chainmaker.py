@@ -128,9 +128,12 @@ class ChainMakerAdapter(LoggingAdapter, Adapter):
         return f"did:plug:{network}:{account_from_public_key(public)}"
 
     def _member_for(self, did: Optional[str]) -> tuple[str, bytes, Any]:
-        member = self._members.get(did or "")
+        """The member of the session bound to this call; a caller-named issuer must be that session's identity."""
+        member = self._members.get(self._bound or "")
         if member is None:
-            raise PlugError("auth_failed", f"no member credentials for {did or 'anonymous caller'}")
+            raise PlugError("auth_failed", "signing needs an open member session on this network")
+        if did and did != self._bound:
+            raise PlugError("auth_failed", f"{did} is not the open session's identity")
         return member
 
     def _send(self, signer, calldata: str):

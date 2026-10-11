@@ -9,6 +9,7 @@ from __future__ import annotations
 import http.client
 import ipaddress
 import json
+import logging
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 from ..core import (
-    Adapter, Attestation, Identity, PlugError, Receipt, SPEC_VERSION, StateRef, Status,
+    ANY, Adapter, Attestation, Identity, PlugError, Receipt, SPEC_VERSION, StateRef, Status,
     parse_time, sha256_hex, statement_hash,
 )
 
@@ -186,13 +187,38 @@ def anchor_error(store: dict, network: str, att) -> Optional[str]:
     return "not_found"
 
 
-# Remote documents (registries, status lists) are attacker-influenced URLs. By default they may only be
-# fetched from public addresses; a deployment with internal registries opts in explicitly.
-_FETCH_POLICY = {"allow_private": False}
+# Remote documents (registries, status lists) are attacker-influenced URLs. Closed by default: nothing is
+# fetched until the operator allows its host, and only from public addresses unless private ones are allowed too.
+_FETCH_POLICY: dict[str, Any] = {"allow_private": False, "hosts": set()}
+_POLICY_LOG = logging.getLogger("plug.policy")
+
+
+def allow_hosts(*hosts: str) -> None:
+    """Allow fetching remote documents from these host names, or from any host with ANY."""
+    for host in hosts:
+        if host == ANY:
+            _POLICY_LOG.warning("remote document fetching opened to ANY host")
+        elif not isinstance(host, str) or not host or "/" in host or "*" in host:
+            raise ValueError(f"not a host name: {host!r}")
+        _FETCH_POLICY["hosts"].add(host if host == ANY else host.lower().strip("[]"))
+
+
+def reset_fetch_policy() -> None:
+    """Back to closed: no hosts, public addresses only."""
+    _FETCH_POLICY.update(allow_private=False, hosts=set())
+
+
+def _check_host(url: str) -> None:
+    hosts = _FETCH_POLICY["hosts"]
+    host = (urlparse(url).hostname or "").lower()
+    if ANY not in hosts and host not in hosts:
+        raise PlugError("not_authorized", f"remote document host {host} is not allowed (closed by default)")
 
 
 def allow_private_networks(allowed: bool = True) -> None:
     """Allow or forbid fetching remote documents from loopback, private, link-local, and other non-public addresses."""
+    if allowed:
+        _POLICY_LOG.warning("remote document fetching opened to private addresses")
     _FETCH_POLICY["allow_private"] = bool(allowed)
 
 
@@ -255,6 +281,7 @@ class _RegistryRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urlparse(newurl).scheme not in ("http", "https"):
             raise PlugError("proof_invalid", "trust registry redirect left http(s)")
+        _check_host(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -325,6 +352,7 @@ def fetch_document(url: str, accept: str = "application/json", max_bytes: int = 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise PlugError("proof_invalid", f"{what} URL must be http or https")
+    _check_host(url)
     # No environment proxy: the guard must see the target host, not a proxy in front of it.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RegistryRedirect,
                                          _GuardedHTTPHandler, _GuardedHTTPSHandler)

@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("chainmaker")
 pytest.importorskip("cryptography")
 
+from plug import ANY
 from plug import suites
 from plug.adapters.chainmaker import ChainMakerAdapter, anchor_calldata
 from dataclasses import replace
@@ -57,7 +58,7 @@ def chain():
     adapter = ChainMakerAdapter(sdk_config(), contract=contract)
     deployed = ChainMakerAdapter.deploy_anchor(adapter.client, contract, member("admin1"))
     assert deployed.status == Status.OK, deployed.error
-    p = Plug()
+    p = Plug(trust={NET: ANY})
     p.register_adapter(NET, adapter)
     return p, adapter
 

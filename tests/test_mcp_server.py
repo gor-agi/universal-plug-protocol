@@ -12,6 +12,7 @@ pytest.importorskip("web3")
 from eth_account import Account
 from mcp.client.client import Client
 
+from plug import ANY
 from plug.adapters.live import LiveAdapter
 from plug.core import Plug
 from plug.mcp_server import build_server
@@ -19,10 +20,10 @@ from test_live_adapter import _FakeW3
 
 
 def server():
-    p = Plug()
+    p = Plug(trust={"sepolia": ANY})
     p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
-    return build_server(p, registries={"partners": "https://registry.example/partners.json"})
+    return build_server(p, registries={"partners": "https://registry.example/partners.json"}, fact_types=["doc.sha256"])
 
 
 async def call(client, name, **args):
@@ -72,9 +73,10 @@ def test_batch_over_mcp_and_registry_allowlist():
             ssrf = await call(client, "check", attestation=out["attestations"][0],
                               trust_registry="http://169.254.169.254/latest/meta-data")
             assert ssrf.get("error", "").startswith("not_authorized")
-            inline = await call(client, "check", attestation=out["attestations"][0],
-                                trust_registry={"issuers": [out["attestations"][0]["issuer"]]})
-            assert inline["valid"] is True
+            r = await client.call_tool("check", {"attestation": out["attestations"][0],
+                                                 "trust_registry": {"issuers": [out["attestations"][0]["issuer"]]}})
+            inline = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
+            assert inline["error"].startswith("not_authorized"), "the model names registries; it cannot write its own"
     run(go())
 
 
@@ -90,7 +92,7 @@ def test_model_cannot_choose_oversight_fact_types_or_its_own_identity():
         p = Recording()
         p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
         p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
-        stamped = build_server(p, model={"model_family": "family-a", "model_id": "m-7"})
+        stamped = build_server(p, model={"model_family": "family-a", "model_id": "m-7"}, fact_types=ANY)
         async with Client(stamped) as client:
             for ft in ("agent.action", "agent.review", "control.resume", "incident.report", "plug.batch"):
                 out = await call(client, "prove", fact="x", fact_type=ft)
@@ -135,7 +137,7 @@ def test_upstream_errors_never_reveal_the_rpc_url():
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
 
     async def go():
-        async with Client(build_server(p)) as client:
+        async with Client(build_server(p, fact_types=["doc.sha256"])) as client:
             out = await call(client, "check", state_ref={"network": "sepolia", "address": "live:0x" + "ab" * 32,
                                                          "kind": "event"})
             assert "SUPERSECRETAPIKEY123" not in json.dumps(out) and out["error"].startswith("not_found")
@@ -156,7 +158,7 @@ def test_unexpected_failures_return_a_generic_error():
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
 
     async def go():
-        async with Client(build_server(p)) as client:
+        async with Client(build_server(p, fact_types=["doc.sha256"])) as client:
             r = await client.call_tool("prove", {"fact": "x", "fact_type": "doc.sha256"})
             out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
             assert out == {"error": "operation failed", "retryable": False}
@@ -188,7 +190,7 @@ def test_receipts_returned_to_the_model_carry_no_registry_url_or_host():
     secret_url = f"http://127.0.0.1:{httpd.server_port}/partners.json?token=s3cr3t"
 
     async def go():
-        async with Client(build_server(p, registries={"partners": secret_url})) as client:
+        async with Client(build_server(p, registries={"partners": secret_url}, fact_types=["doc.sha256"])) as client:
             att = (await call(client, "prove", fact="x", fact_type="doc.sha256"))["attestation"]
             out = await call(client, "check", attestation=att, trust_registry="partners")
             assert out["valid"] is True, out
@@ -208,7 +210,7 @@ def test_batch_and_fact_size_limits():
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
 
     async def go():
-        async with Client(build_server(p, max_batch=3, max_fact_bytes=16)) as client:
+        async with Client(build_server(p, max_batch=3, max_fact_bytes=16, fact_types=["doc.sha256"])) as client:
             for name, args, error in (
                     ("prove_batch", {"facts": ["a"] * 4, "fact_type": "doc.sha256"}, "at most 3 facts"),
                     ("prove", {"fact": "x" * 17, "fact_type": "doc.sha256"}, "at most 16 bytes"),
@@ -217,5 +219,22 @@ def test_batch_and_fact_size_limits():
                 out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
                 assert error in out["error"] and out["retryable"] is False, out
             assert (await call(client, "prove_batch", facts=["a"] * 3, fact_type="doc.sha256"))["status"] == "ok"
+    run(go())
+
+
+def test_mcp_is_closed_until_the_operator_grants_fact_types_and_bounded_by_rate():
+    p = Plug(trust={"sepolia": ANY})
+    p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
+    p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+
+    async def go():
+        async with Client(build_server(p)) as client:
+            out = await call(client, "prove", fact="x", fact_type="doc.sha256")
+            assert out["error"] == "not_authorized: this server allows no fact types (closed by default)"
+            assert (await call(client, "networks"))["fact_types"] is None
+        async with Client(build_server(p, fact_types=["doc.sha256"], rate=(3, 3600))) as client:
+            results = [await call(client, "networks") for _ in range(4)]
+            assert "error" not in results[2] and results[3]["error"].startswith("rate_limited")
+            assert results[3]["retryable"] is True
     run(go())
 

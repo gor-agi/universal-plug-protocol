@@ -123,6 +123,11 @@ class EudiAdapter(InMemoryAdapter):
         self.credential_formats = credential_formats or ["sd-jwt-vc", "mso-mdoc"]
         self._status_tokens: dict[str, tuple] = {}  # uri -> (parsed token, fetched at)
 
+    @property
+    def trust_policy(self) -> bool:
+        """Configured trusted lists are the operator's trust policy for this adapter."""
+        return bool(self.trusted_lists)
+
     def attest(self, network: Optional[str], att: Attestation) -> Receipt:
         fmt = att.meta.get("credential_format")
         if fmt and fmt not in self.credential_formats:

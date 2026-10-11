@@ -16,7 +16,9 @@ import os
 import re
 from typing import Any, Optional
 
-from .core import Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type, fact_bytes
+import time
+
+from .core import ANY, Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type, fact_bytes
 
 # Fact types the model may not have the server sign unless the operator allowlists them: oversight evidence
 # about the model itself, and plug.* commitments, which only the plug produces (never allowlistable).
@@ -80,18 +82,24 @@ def attestation_from_json(d: dict) -> Attestation:
 
 
 def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: str = "universal-plug",
-                 fact_types: Optional[list[str]] = None, model: Optional[dict] = None,
-                 max_batch: int = 1000, max_fact_bytes: int = 1 << 20):
-    """An MCP server over an already configured Plug. registries: allowlisted name -> registry URL.
+                 fact_types: Any = None, model: Optional[dict] = None,
+                 max_batch: int = 1000, max_fact_bytes: int = 1 << 20, rate: tuple[int, float] = (120, 60.0)):
+    """An MCP server over an already configured Plug. Closed by default: the model gets only what is granted here.
 
-    fact_types: allowlist of fact types the model may prove; None allows any type outside
-    RESERVED_FACT_TYPES. model: {"model_family", "model_id"} the server stamps into meta, replacing
-    whatever the model sends. max_batch and max_fact_bytes bound what one call may ask the server to hash and sign.
+    registries: the trust registries the model may name (name -> registry); it cannot pass its own.
+    fact_types: the fact types the model may prove. None (the default) allows none; ANY allows any type
+    outside RESERVED_FACT_TYPES; plug.* types are never allowed. model: {"model_family", "model_id"} the
+    server stamps into meta, replacing whatever the model sends. max_batch and max_fact_bytes bound what one
+    call may ask the server to hash and sign; rate is (calls, seconds) across all tools.
     """
     from mcp.server.mcpserver import MCPServer
 
     allowed = dict(registries or {})
-    allowed_types = None if fact_types is None else {canon_fact_type(t) for t in fact_types}
+    if fact_types == ANY:
+        _LOG.warning("MCP fact types opened to ANY non-reserved type")
+    allowed_types = fact_types if fact_types in (None, ANY) else {canon_fact_type(t) for t in fact_types}
+    calls, per = rate
+    budget = {"tokens": float(calls), "at": time.monotonic()}
     stamp = {k: str(v) for k, v in (model or {}).items() if k in _MODEL_META}
     server = MCPServer(name, instructions=(
         "Verifiable evidence across networks. prove records a fact and returns an attestation; "
@@ -99,17 +107,19 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
         "watch subscribes to a state reference. Keys are held by this server."))
 
     def registry(value: Any):
-        if value is None or isinstance(value, dict):
-            return value
+        if value is None:
+            return None
         if isinstance(value, str) and value in allowed:
             return allowed[value]
-        raise PlugError("not_authorized", "trust_registry must be inline or one of: " + ", ".join(sorted(allowed)))
+        raise PlugError("not_authorized", "trust_registry must be one of: " + (", ".join(sorted(allowed)) or "(none)"))
 
     def admit(fact_type: str) -> str:
         ft = canon_fact_type(fact_type)
-        if ft.startswith("plug.") or (allowed_types is None and ft.startswith(RESERVED_FACT_TYPES)):
+        if ft.startswith("plug.") or (allowed_types == ANY and ft.startswith(RESERVED_FACT_TYPES)):
             raise PlugError("not_authorized", f"fact type {ft} is reserved")
-        if allowed_types is not None and ft not in allowed_types:
+        if allowed_types is None:
+            raise PlugError("not_authorized", "this server allows no fact types (closed by default)")
+        if allowed_types != ANY and ft not in allowed_types:
             raise PlugError("not_authorized", f"fact type {ft} is not allowed by this server")
         return ft
 
@@ -127,6 +137,12 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
         return out
 
     def guarded(fn):
+        now = time.monotonic()
+        budget["tokens"] = min(float(calls), budget["tokens"] + (now - budget["at"]) * calls / per)
+        budget["at"] = now
+        if budget["tokens"] < 1:
+            return {"error": f"rate_limited: at most {calls} calls per {per:g} seconds", "retryable": True}
+        budget["tokens"] -= 1
         try:
             return fn()
         except PlugError as e:
@@ -180,11 +196,13 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
     @server.tool(description="Registered networks, the active session subject, allowlisted trust registries, "
                              "and the fact types this server will prove.")
     def networks() -> dict:
-        s = plug.active()
-        return {"networks": sorted(plug._adapters), "registries": sorted(allowed),
-                "fact_types": sorted(allowed_types) if allowed_types is not None else None,
-                "reserved_fact_types": list(RESERVED_FACT_TYPES),
-                "active": {"network": s.network, "subject": s.credential_subject} if s else None}
+        def run():
+            s = plug.active()
+            return {"networks": sorted(plug._adapters), "registries": sorted(allowed),
+                    "fact_types": allowed_types if allowed_types in (None, ANY) else sorted(allowed_types),
+                    "reserved_fact_types": list(RESERVED_FACT_TYPES),
+                    "active": {"network": s.network, "subject": s.credential_subject} if s else None}
+        return guarded(run)
 
     return server
 
@@ -192,11 +210,17 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
 def plug_from_config(config: dict) -> tuple[Plug, dict]:
     """Plug from a JSON config. Secrets are named by environment variable, never written in the file:
     {"hash_alg": "sha-256", "commitment": "plain", "registries": {"eu": "https://..."},
+     "trust": {"sepolia": {"issuers": ["did:..."]}}, "hosts": ["registry.example"],
      "fact_types": ["doc.sha256"], "model": {"model_family": "...", "model_id": "..."},
      "networks": {"sepolia": {"adapter": "live", "rpc_url_env": "SEPOLIA_RPC_URL", "key_env": "SEPOLIA_PRIVATE_KEY"}}}
-    fact_types and model are read by main() and passed to build_server.
+    Everything is closed unless granted here: trust per network (a registry or "ANY"), hosts to fetch remote
+    documents from (or "ANY"), and fact_types (read by main() and passed to build_server).
     """
-    plug = Plug(hash_alg=config.get("hash_alg", "sha-256"), commitment=config.get("commitment", "plain"))
+    from .adapters.base import allow_hosts
+    plug = Plug(hash_alg=config.get("hash_alg", "sha-256"), commitment=config.get("commitment", "plain"),
+                trust=config.get("trust"))
+    hosts = config.get("hosts") or []
+    allow_hosts(*([hosts] if hosts == ANY else hosts))
     for name, spec in (config.get("networks") or {}).items():
         kind = spec.get("adapter")
         if kind == "live":

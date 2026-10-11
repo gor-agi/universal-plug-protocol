@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("cryptography")
 
+from plug import ANY
 from plug import suites
 from plug.adapters.eudi import EudiAdapter
 from plug.core import Attestation, Plug, sha256_hex, statement_hash
@@ -22,7 +23,7 @@ ISSUER = "did:web:pid-provider.example"  # a DID method no adapter resolves on i
 
 
 def eudi_with(subject, issued=NOW):
-    p = Plug()
+    p = Plug(trust={"eudi": ANY})
     p.register_adapter("eudi", EudiAdapter())
     p.open("eudi", {"scheme": "raw", "material": "w", "subject": "holder"})
     p.attest("eudi", Attestation(subject, "identity.pid", ISSUER, iso(issued)))
@@ -71,7 +72,7 @@ def test_ledger_judges_the_key_at_anchored_time():
     from plug.adapters.live import LiveAdapter
     from test_live_adapter import _FakeW3
     w3 = _FakeW3()
-    p = Plug()
+    p = Plug(trust={"sepolia": ANY})
     p.register_adapter("sepolia", LiveAdapter(w3=w3))
     acct = Account.create()
     p.open("sepolia", {"scheme": "raw", "material": acct.key.hex()})

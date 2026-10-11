@@ -2,6 +2,28 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.4.0
+
+### Breaking: closed by default
+
+One permission layer: a grant is an explicit list, empty by default, and the single value `ANY` opens it on purpose and is logged on `plug.policy` (SPEC, Permissions; docs/threat-model.md, G7 and P14).
+
+- **Verification needs a trust policy.** `Plug(trust={network: registry})` or `plug.trust(network, registry)` sets the operator's policy; a registry passed to `check` narrows it and never widens it. With no policy, `check` is rejected (`not_authorized: no trust policy for <network> (closed by default)`). `ANY` accepts any authentic issuer. A malformed policy raises.
+- **Remote documents only from allowed hosts.** `plug.adapters.base.allow_hosts(...)`; redirects are held to the same list; private addresses still need `allow_private_networks()`.
+- **Only the open session signs.** A ledger adapter signs only for the session open on its network: no anonymous signing with its configured key, and no signing for an issuer a caller merely names (a review found `attest` would sign with any loaded key whose address the issuer named).
+- **MCP proves nothing until granted.** `build_server(fact_types=[...])` or `ANY`; registries only by operator-given name (inline registries from the model are refused); calls are rate-limited (`rate=(calls, seconds)`, 120 per minute by default). Config gains `trust` and `hosts`.
+
+### Added
+
+- `KeySigner`, `Pkcs11Signer` (keys inside an HSM or SoftHSM; P-256 and Ed25519), and `sign_attestation` in `plug.suites`; the `hsm` extra. CI signs inside a SoftHSM2 token.
+- Extra read endpoints for the Ethereum adapter (`read_urls`, `readers`): verification reads must agree across all of them, and finality is the weakest reported.
+- JWS `alg` `Ed25519` (RFC 9864) for status list tokens, alongside `EdDSA`.
+- Oracles: Wycheproof secp256k1 through Ethereum recovery; `joserfc` signs status list tokens our verifier must accept.
+
+### Changed
+
+- Merkle batches build their tree once (`merkle_levels`), O(n) instead of O(n^2) for all inclusion proofs; output unchanged.
+
 ## 0.3.2
 
 ### Security

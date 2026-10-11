@@ -1,6 +1,6 @@
 # Universal Plug Protocol Specification
 
-Version 0.3.0
+Version 0.4.0
 
 UPP defines a universal interface for attestations and identity across heterogeneous networks. Eight core operations — connect, identify, attest, query, verify, settle, bridge, subscribe — plus five session operations. Three user-facing verbs: prove, check, watch.
 
@@ -13,7 +13,24 @@ This document is the canonical reference. The implementation must match it; wher
 - **No token ops.** No mint, burn, swap, or stake. If a network adds a compliant token layer, that folds into settle or becomes a fourteenth op by explicit decision.
 - **Fixed Receipt, open vocabularies.** Receipt shape is locked. Fact types, settle op names, and error extensions are open strings with recommended sets.
 - **Anti-bloat.** Thin, inspectable, agent-facing. Every addition must earn its place against the three verbs.
+- **Closed by default.** Nothing is trusted, fetched, or signed without the operator's explicit grant. The same permission layer can open any grant, but only by the explicit value `ANY`, whose use is logged (see Permissions).
 - **Jurisdiction-agnostic.** Privacy and trust primitives are expressed as constraints and optional parameters, never as European-specific or national-specific features. Any deployment profile — EU, sovereign fabric, enterprise — satisfies its rules through adapters and configuration, not core changes.
+
+## Permissions
+
+One rule everywhere: a permission is a list of what the operator grants, empty by default. `ANY` opens a permission explicitly and is logged; there is no other wildcard, and a malformed grant is an error, never an opening.
+
+| Permission | Granted with | Default | Opened with `ANY` |
+| --- | --- | --- | --- |
+| Which issuers verify on a network | `Plug(trust={network: registry})`, `plug.trust(network, registry)` | none: verify is rejected | any authentic issuer (authenticity is still checked) |
+| Narrowing at a call | `check(target, trust_registry=...)` | — | — (a caller's registry only narrows the operator's) |
+| Which hosts remote documents come from | `allow_hosts(host, ...)` | none; private addresses need `allow_private_networks()` too | any public host |
+| Who signs | an open session on that network | nobody: an adapter signs only for the open session's identity, never for an issuer a caller names | — |
+| What a model may prove over MCP | `build_server(fact_types=[...])` | nothing | any type outside the reserved prefixes |
+| Which registries a model may name over MCP | `build_server(registries={name: registry})` | none | — |
+| How often a model may call | `build_server(rate=(calls, seconds))` | 120 per minute | — |
+
+An adapter may carry operator trust of its own, such as the EUDI profile's trusted lists; it counts as a policy for its network and is narrowed, never replaced, by a caller's registry.
 
 ## Core types
 
@@ -77,7 +94,7 @@ A proof is valid only when its signature verifies and the issuer DID names the s
 2. **identify** — prove who you are on a network. Takes network plus Identity.
 3. **attest** — hash a real-world fact, sign, bind to a record. Core op.
 4. **query** — read ledger state back via StateRef.
-5. **verify** — check someone else's attestation against that network's rules. Never trusts the issuer. Optional trust_registry parameter: a URL, an inline registry document, or a StateRef pointing at a published issuer registry. Core passes it through; adapters resolve it. Not enforced by core.
+5. **verify** — check someone else's attestation against that network's rules. Never trusts the issuer. Optional trust_registry parameter: a URL, an inline registry document, or a StateRef pointing at a published issuer registry; adapters resolve it. Core enforces that some trust policy applies (see Permissions): the operator's policy for the network, the caller's registry, or both, in which case both must pass. With none, verify is rejected as `not_authorized`.
 
    On a ledger network, verify is valid only when all of these hold: the signature recovers to `verification_method`; the issuer DID names that same key; the anchor exists on this network, succeeded, was sent by that key, and carries the statement hash. The receipt reports the anchor block, its timestamp as `anchored_at`, and finality. A signature alone proves possession of a key, not that a fact was recorded or when.
 
@@ -110,7 +127,7 @@ Rules: explicit network beats active session; neither exists means error, not gu
 
 **Reserved commitment domain.** Bridge and batch commitments and statements are canonical JSON objects keyed `plug.bridge`, `plug.batch`, and `plug.statement`. prove and prove_batch refuse any fact whose bytes begin with `{"plug.`, so no proven fact can be presented as one of these commitments, and a single-fact anchor can never pass as a batch root.
 
-Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only inline or by name from a server-side allowlist. The model does not choose what the server's key vouches for: fact types under `agent.`, `control.`, and `incident.` are refused unless the operator allowlists them, `plug.` types are always refused, and `model_family` and `model_id` are set by the server, never taken from the model. Meta that an adapter dereferences, such as a status list reference, is likewise the operator's to set. Nothing returned to the model carries URLs, endpoints, or host addresses, and each call is bounded in batch size and fact size.
+Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only by name from a server-side allowlist, never one the model writes. The model does not choose what the server's key vouches for: it may prove only the fact types the operator grants (none by default; `ANY` grants every type outside `agent.`, `control.`, and `incident.`, which must be granted by name), `plug.` types are always refused, calls are rate-limited, and `model_family` and `model_id` are set by the server, never taken from the model. Meta that an adapter dereferences, such as a status list reference, is likewise the operator's to set. Nothing returned to the model carries URLs, endpoints, or host addresses, and each call is bounded in batch size and fact size.
 
 ## Error model
 

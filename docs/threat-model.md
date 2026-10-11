@@ -1,6 +1,6 @@
 # Threat model and security problem definitions
 
-Status: working document for the 0.3 security audit. It defines, per component, what must hold, what an attacker controls, and how it fails, so that existing solutions can be matched against precise requirements and an auditor can test against them. [SPEC.md](../SPEC.md) remains normative.
+Status: working document for the 0.3–0.4 security work. It defines, per component, what must hold, what an attacker controls, and how it fails, so that existing solutions can be matched against precise requirements and an auditor can test against them. [SPEC.md](../SPEC.md) remains normative.
 
 ## System and trust boundaries
 
@@ -18,6 +18,7 @@ Status: working document for the 0.3 security audit. It defines, per component, 
 - **G4 Agent containment.** Nothing the model sends makes the server sign outside operator policy, act as another identity, reach hosts the operator did not intend, or learn secrets.
 - **G5 Cross-implementation agreement.** Two conforming implementations compute identical bytes for every canonical form, digest, commitment, and statement.
 - **G6 Availability under hostile input.** Hostile inputs cost bounded time and memory and never turn an error into acceptance (fail closed).
+- **G7 Closed by default.** Nothing is trusted, fetched, signed, or exposed without the operator's explicit grant. Any grant can be opened, but only explicitly (`ANY`), visibly, and on the record.
 
 ## Problem definitions
 
@@ -140,7 +141,16 @@ Each entry: requirement, attacker control, failure modes, current implementation
 - **Defining.** Ethereum light client protocol, `eth_getProof` (EIP-1186), ChainMaker light nodes.
 - **Look for.** Light clients (for example Helios) or multi-endpoint quorum for verifiers that need more than endpoint trust.
 
-## Status and decisions (0.3.2)
+### P14 Closed by default (permission layer)
+
+- **Requirement.** Every way in starts closed and opens only by an explicit operator grant of one uniform shape: a list of what is granted, or the single value `ANY`, which is logged. Callers narrow grants and never widen them. A missing or malformed grant denies; it never falls back to allowing. Ways in: which issuers verify (per network), which hosts remote documents come from, who may sign with an adapter's key, what an AI model may prove, which registries it may name, and how often it may call.
+- **Attacker controls.** Self-generated keys and DIDs (authentic but unknown issuers), URLs in credentials and registries, unauthenticated callers in the same process, every MCP tool argument.
+- **Failure.** "Valid" for anyone who can generate a key (open verification); requests to any host; anonymous signing with the operator's key; a model granting itself trust or fact types.
+- **Before 0.4.** Verification without a registry accepted any authentic issuer; any public host was fetched; anonymous callers signed with a ledger adapter's default key; MCP allowed any non-reserved fact type and inline registries written by the model; no rate limit.
+- **Defining.** OWASP ASVS (deny by default), CISA Secure by Design / Secure by Default, NIST SP 800-207 (zero trust); precedents that require explicit verification policy: Sigstore cosign identities, in-toto layouts, TUF roots and delegations, W3C VC verifier trust.
+- **Look for.** A capability or policy framework only if an allowlist cannot express a need. Surveyed: UCAN, Biscuit, macaroons, ZCAP-LD, OAuth scopes; none is needed for allowlists of issuers, hosts, and fact types.
+
+## Status and decisions (0.4.0)
 
 Decided after researching existing solutions for each problem and auditing the code against these definitions. "Oracle" means the third-party implementation or vectors run in our tests against our code.
 
@@ -148,17 +158,18 @@ Decided after researching existing solutions for each problem and auditing the c
 | --- | --- | --- | --- |
 | P1 JCS | Keep ours (core has no runtime dependencies); scalars now canonicalized too | cyberphone RFC 8785 reference data; Trail of Bits `rfc8785` on random values; Node | — |
 | P2 Digests | Keep `hashlib`, `gmssl` fallback for SM3 | GmSSL SM3 reference digests | C-backed SM3 (`tongsuopy`) once ARM64 wheels exist |
-| P3 Merkle | Keep ours (no maintained Python library) | transparency-dev/merkle vectors; Node verifier | Iterative MTH for very large batches |
-| P4 Signatures | **Adopted pyca/cryptography** (OpenSSL) for Ed25519 and P-256; eth-keys/libsecp256k1 for secp256k1; `gmssl` for SM2. Keys validated; Ed25519 small-order keys rejected (OpenSSL accepts forgeries under them) | Wycheproof P-256 (r‖s) and Ed25519; OpenSSL 3 interop | SM2 signing is not constant-time; Wycheproof secp256k1 needs a recovery harness |
+| P3 Merkle | Keep ours (no maintained Python library); levels built once, O(n) per batch | transparency-dev/merkle vectors; Node verifier | — |
+| P4 Signatures | **Adopted pyca/cryptography** (OpenSSL) for Ed25519 and P-256; eth-keys/libsecp256k1 for secp256k1; `gmssl` for SM2. Keys validated; Ed25519 small-order keys rejected (OpenSSL accepts forgeries under them) | Wycheproof P-256 (r‖s), Ed25519, and secp256k1 through Ethereum recovery (all 476 cases; the two needing recovery id 2 or 3 are unrepresentable in Ethereum); OpenSSL 3 interop | SM2 signing is not constant-time. Surveyed: `tongsuopy` fails to load on macOS arm64 (upstream issues #3, #25) and has no Linux aarch64 wheel; `gmssl-python` needs the native GmSSL library and conflicts with `gmssl`. Revisit when either changes |
 | P5 DIDs | Keep ours; canonical did:key only (one key, one identifier) | multicodec table; Node verifier | — |
-| P6 JOSE | Keep the minimal verifier (ES256, EdDSA only; verifier-chosen keys) | — | Cross-check with joserfc |
-| P7 Status lists | Keep ours; freshness by signed `iat`, rollback refused | draft-21 Appendix C vectors | Cross-check with pyeudiw |
-| P8 Trust lists | Narrowed claim: JSON registries, not ETSI TS 119 612 or OpenID Federation; operator lists always apply, callers can only narrow | — | `signxml` for XAdES trusted lists; OpenID Federation library |
-| P9 Credentials | Narrowed claim: format names only | — | `sd-jwt-python`, `pymdoccbor` |
-| P10 SSRF | Keep ours (checks the connected socket, which is stronger than resolve-and-pin); multicast, NAT64 local-use, IPv4-compatible, SIIT, and SRv6 ranges refused | requests-hardened's blocklist | Recommend an egress proxy (smokescreen) in production |
-| P11 MCP | Keep ours; operator-only meta, receipts redacted of URLs and hosts, batch and fact size limits | — | OAuth 2.1 (`mcpauth`) and rate limiting (`slowapi`) when a remote transport is added |
-| P12 Keys | — | — | Signer interface for KMS/HSM (AWS/GCP KMS for secp256k1, PKCS#11 for P-256/Ed25519/SM2) |
-| P13 Ledger reads | — | — | Helios light client or multi-endpoint quorum; ChainMaker SPV node |
+| P6 JOSE | Keep the minimal verifier (ES256, Ed25519 per RFC 9864, EdDSA; verifier-chosen keys) | joserfc (Authlib) signs tokens our verifier must accept; its unsigned tokens are refused | — |
+| P7 Status lists | Keep ours; freshness by signed `iat`, rollback refused | draft-21 Appendix C vectors (all four bit widths over 2^20 entries); tokens from joserfc | — |
+| P8 Trust lists | Narrowed claim: JSON registries, not ETSI TS 119 612 or OpenID Federation; operator lists always apply, callers can only narrow | — | Verified recipe for an opt-in extension: `signxml` `XMLVerifier(...).verify(tl, x509_cert=pinned, expect_config=SignatureConfiguration(require_x509=True, expect_references=2))`, trying each LOTL-pinned signer certificate (proven against the live Luxembourg TL). Consuming it needs X.509 path validation to RSA CA anchors, which belongs to a credential-verification layer, not the plug's key model |
+| P9 Credentials | Narrowed claim: format names only | — | Verified recipe for the same extension: `sd-jwt-python` (pinned git ref; enforce `typ` `dc+sd-jwt` ourselves; inspect the verified payload, since forged disclosures are dropped silently) and `pymdoccbor` `MsoVerifier` |
+| P10 SSRF | Keep ours (checks the connected socket, which is stronger than resolve-and-pin); hosts allowlisted (P14); multicast, NAT64 local-use, IPv4-compatible, SIIT, and SRv6 ranges refused | requests-hardened's blocklist | An egress proxy (smokescreen) is still recommended in production |
+| P11 MCP | Keep ours; closed by default (fact types and registries granted by the operator), operator-only meta, receipts redacted, batch and fact size limits, rate limit | — | The server runs over stdio only; a remote transport must add OAuth 2.1 (`mcpauth`) first |
+| P12 Keys | Signer interface: `KeySigner` (in process) and `Pkcs11Signer` (HSM or SoftHSM; P-256 and Ed25519); `sign_attestation(signer, att)` | SoftHSM2 token in CI: proofs signed inside the token verify, keys are non-extractable | secp256k1 (Ethereum transactions) and SM2 keys stay in process: SoftHSM lacks those curves, and cloud KMS (AWS/GCP support secp256k1) cannot be tested here without accounts |
+| P13 Ledger reads | The Ethereum adapter takes extra read endpoints; every read verification relies on must agree across all, finality is the weakest reported. A Helios light client is one such endpoint (it serves verified JSON-RPC) | tests with a lying and a lagging endpoint | ChainMaker: its SPV node is Go-only; run it as a sidecar read endpoint when an adapter for it is added |
+| P14 Closed by default | One permission shape (grant list or explicit, logged `ANY`), caller narrows only, misconfiguration fails | dedicated permission tests | — |
 
 ## External audit
 

@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("cryptography")
 
+from plug import ANY
 from plug import suites
 from plug.adapters.oracle import OracleAdapter
 from plug.core import Attestation, FactType, Plug, sha256_hex, statement_hash
@@ -29,7 +30,7 @@ class Party:
 
 
 def plug():
-    p = Plug()
+    p = Plug(trust={NET: ANY})
     p.register_adapter(NET, OracleAdapter(max_jump=10.0))
     return p
 

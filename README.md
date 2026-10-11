@@ -38,7 +38,7 @@ pip install --no-deps "chainmaker==3.0.7"
 from plug import Attestation, Plug
 from plug.adapters import StubAdapter
 
-plug = Plug()
+plug = Plug(trust={"testnet": {"issuers": ["did:plug:testnet:alice"]}})  # closed by default: grant trust explicitly
 plug.register_adapter("testnet", StubAdapter())
 plug.open("testnet", {"scheme": "raw", "material": "key", "subject": "alice"})
 
@@ -50,6 +50,15 @@ print(plug.check(attestation)["valid"])           # False here: the stub holds n
 ```
 
 An explicit network is required when there is no open session. Prove hashes `bytes` as raw bytes. A trust registry is `{"issuers": ["did:..."]}`, passed inline or as a URL fetched by the adapter over http or https. The attestation issuer has to be in that list.
+
+## Closed by default
+
+Nothing is trusted, fetched, or signed until the operator grants it, and `ANY` is the one explicit, logged way to open a grant:
+
+- `Plug(trust={"sepolia": {"issuers": ["did:..."]}})`: only listed issuers verify on that network; with no policy, `check` is rejected. A registry passed to `check` narrows the operator's, never widens it. `ANY` accepts any authentic issuer.
+- `plug.adapters.base.allow_hosts("registry.example")`: the hosts registries and status lists may be fetched from; private addresses also need `allow_private_networks()`.
+- Signing needs an open session; an adapter's configured key is never used anonymously.
+- The MCP server proves only the fact types it is given (`fact_types=[...]` or `ANY`), accepts only named registries, and rate-limits calls.
 
 ## Specification
 

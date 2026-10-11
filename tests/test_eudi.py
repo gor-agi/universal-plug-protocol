@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("cryptography")
 
+from plug import ANY
 from plug import suites
 from plug.adapters.eudi import EudiAdapter, decode_status_list, status_at
 from plug.core import Attestation, Plug, PlugError, statement_hash
@@ -35,6 +36,11 @@ class Server:
                     self.end_headers()
                     return
                 ctype, body = outer.docs[self.path]
+                if ctype == "redirect":
+                    self.send_response(302)
+                    self.send_header("Location", body)
+                    self.end_headers()
+                    return
                 raw = body if isinstance(body, bytes) else body.encode()
                 self.send_response(200)
                 self.send_header("Content-Type", ctype)
@@ -96,7 +102,7 @@ class Issuer:
 
 
 def plug(**kw):
-    p = Plug()
+    p = Plug(trust={NET: ANY})
     p.register_adapter(NET, EudiAdapter(**kw))
     return p
 
@@ -372,4 +378,64 @@ def test_old_status_list_tokens_are_refused_by_their_signed_iat(server):
         uri = publish(server, issuer, path, [0], claims=claims)
         v = p.check(issuer.credential(p, path, 0, uri), network=NET)
         assert v["receipt"].error == error, path
+
+
+@pytest.mark.parametrize("alg,jose", [("ecdsa-p256", "ES256"), ("ed25519", "Ed25519"), ("ed25519", "EdDSA")])
+def test_status_list_tokens_from_an_independent_jose_library(server, alg, jose):
+    """joserfc (Authlib) signs; our verifier must accept its tokens and reject its unsigned ones."""
+    import warnings
+    pytest.importorskip("joserfc")
+    from joserfc import jwk, jwt
+    issuer, p = Issuer(alg), plug()
+    if alg == "ecdsa-p256":
+        from cryptography.hazmat.primitives.asymmetric import ec
+        numbers = ec.derive_private_key(int(issuer.key, 16), ec.SECP256R1()).private_numbers()
+        key = jwk.ECKey.import_key({"kty": "EC", "crv": "P-256", "d": b64u(numbers.private_value.to_bytes(32, "big")),
+                                    "x": b64u(numbers.public_numbers.x.to_bytes(32, "big")),
+                                    "y": b64u(numbers.public_numbers.y.to_bytes(32, "big"))})
+    else:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        public = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(issuer.key)).public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        key = jwk.OKPKey.import_key({"kty": "OKP", "crv": "Ed25519", "d": b64u(bytes.fromhex(issuer.key)),
+                                     "x": b64u(public)})
+    uri = server.url(f"/sl/joserfc-{jose}")
+    claims = {"sub": uri, "iat": int(time.time()), "ttl": 600, "status_list": {"bits": 1, "lst": lst([0, 1])}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        token = jwt.encode({"alg": jose, "typ": "statuslist+jwt"}, claims, key, algorithms=[jose])
+    server.docs[f"/sl/joserfc-{jose}"] = ("application/statuslist+jwt", token)
+    assert p.check(issuer.credential(p, f"ok-{jose}", 0, uri), network=NET)["valid"] is True
+    assert p.check(issuer.credential(p, f"rev-{jose}", 1, uri), network=NET)["receipt"].error == \
+        "proof_invalid: revoked via status list"
+    head, body, _ = token.split(".")
+    unsigned = b64u(json.dumps({"alg": "none", "typ": "statuslist+jwt"}).encode()) + "." + body + "."
+    server.docs[f"/sl/joserfc-{jose}"] = ("application/statuslist+jwt", unsigned)
+    fresh = plug()
+    v = fresh.check(issuer.credential(fresh, f"none-{jose}", 0, uri), network=NET)
+    assert v["valid"] is False and "not signed by a key of the issuer" in v["receipt"].error
+
+
+def test_remote_documents_are_fetched_only_from_allowed_hosts(server):
+    from plug.adapters import base
+    from plug.adapters.base import fetch_document
+    server.docs["/doc"] = ("application/json", "{}")
+    base.reset_fetch_policy()
+    base.allow_private_networks(True)
+    with pytest.raises(PlugError, match="not allowed \\(closed by default\\)"):
+        fetch_document(server.url("/doc"))
+    assert server.hits.get("/doc", 0) == 0
+    base.allow_hosts("127.0.0.1")
+    assert fetch_document(server.url("/doc")) == b"{}"
+    with pytest.raises(PlugError, match="not allowed"):
+        fetch_document(f"http://localhost:{server.httpd.server_port}/doc")
+    server.docs["/hop"] = ("redirect", f"http://localhost:{server.httpd.server_port}/doc")
+    hits = server.hits.get("/doc", 0)
+    with pytest.raises(PlugError, match="not allowed"):
+        fetch_document(server.url("/hop"))
+    assert server.hits.get("/doc", 0) == hits, "a redirect to a host not allowed is not followed"
+    for bad in ("*.example.org", "http://x", "", "a/b"):
+        with pytest.raises(ValueError):
+            base.allow_hosts(bad)
 

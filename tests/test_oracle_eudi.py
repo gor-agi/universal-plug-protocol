@@ -2,6 +2,7 @@
 # Copyright Contributors to the Universal Plug Protocol project
 """OracleAdapter and EudiAdapter tests - in-memory, no network. Public surfaces only."""
 import time
+from plug import ANY
 from plug.core import (Plug, Attestation, Identity, StateRef, Status, Role, FactType, statement_hash,
                   PlugError, sha256_hex)
 from plug.adapters.oracle import OracleAdapter
@@ -9,14 +10,14 @@ from plug.adapters.eudi import EudiAdapter
 
 
 def setup_oracle():
-    p = Plug()
+    p = Plug(trust={"oracle": ANY})
     p.register_adapter("oracle", OracleAdapter())
     p.open("oracle", {"scheme": "raw", "material": "oracle-key-1", "subject": "sensor-01"})
     return p
 
 
 def setup_eudi():
-    p = Plug()
+    p = Plug(trust={"eudi": ANY})
     p.register_adapter("eudi", EudiAdapter())
     p.open("eudi", {"scheme": "raw", "material": "wallet-key-1", "subject": "alice"})
     return p
@@ -61,7 +62,7 @@ def test_oracle_jump_bound_enforced():
 
 
 def test_oracle_authorized_issuer_gate():
-    p = Plug()
+    p = Plug(trust={"oracle": ANY})
     p.register_adapter("oracle", OracleAdapter(authorized_issuers={"did:plug:oracle:sensor-01"}))
     p.open("oracle", {"scheme": "raw", "material": "k", "subject": "sensor-01"})
     r = p.prove("x", FactType.SENSOR_READING)

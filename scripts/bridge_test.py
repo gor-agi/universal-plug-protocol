@@ -48,6 +48,7 @@ def main():
     p.register_adapter("sepolia", LiveAdapter())
 
     p.open("chainmaker", {"scheme": "x509", "material": member("client1")})
+    p.trust("chainmaker", {"issuers": [p.active().credential_subject]})  # closed by default: trust our member only
     src = p.prove({"certificate_of_origin": "CO-2026-0042", "hs_code": "7403.11"}, "doc.sha256")
     print(f"source attest:      {src.status.value} {src.state_ref.address} block {src.data['block']}")
     att = Attestation.from_receipt(src)
@@ -55,6 +56,7 @@ def main():
     print(f"source check:       {v['valid']} org {v['receipt'].data.get('org_id')} finality {v['receipt'].data.get('finality')}")
 
     p.open("sepolia", {"scheme": "raw", "material": os.environ["SEPOLIA_PRIVATE_KEY"]})
+    p.trust("sepolia", {"issuers": [p.active().credential_subject]})
     br = p.bridge(src.state_ref, "sepolia")
     print(f"bridge:             {br.status.value} {br.state_ref.address if br.state_ref else None}")
     both = p.check(br)

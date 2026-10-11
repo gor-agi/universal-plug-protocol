@@ -7,6 +7,7 @@ import os
 
 import pytest
 
+from plug import ANY
 from plug.adapters.stub import StubAdapter
 from plug.core import (Attestation, Plug, PlugError, Status, batch_commitment, merkle_leaf_hash, merkle_path,
                        merkle_root, merkle_verify_inclusion, sha256_hex)
@@ -38,7 +39,7 @@ def test_generated_paths_verify_for_all_positions():
 
 
 def batch_plug(**kw):
-    p = Plug(**kw)
+    p = Plug(trust={"testnet": ANY}, **kw)
     p.register_adapter("testnet", StubAdapter())
     p.open("testnet", {"scheme": "raw", "material": "k", "subject": "alice"})
     return p
@@ -85,7 +86,7 @@ def test_batch_on_ledger_adapter_verifies_every_member():
     from eth_account import Account
     from plug.adapters.live import LiveAdapter
     from test_live_adapter import _FakeW3
-    p = Plug()
+    p = Plug(trust={"sepolia": ANY})
     p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
     receipts = p.prove_batch([f"container-{i}" for i in range(7)], "doc.sha256")
@@ -103,7 +104,7 @@ def _ledger_plug(**kw):
     from eth_account import Account
     from plug.adapters.live import LiveAdapter
     from test_live_adapter import _FakeW3
-    p = Plug(**kw)
+    p = Plug(trust={"sepolia": ANY}, **kw)
     p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
     return p

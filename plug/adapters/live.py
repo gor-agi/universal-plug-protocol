@@ -101,11 +101,14 @@ def _hex(value) -> str:
 class LiveAdapter(LoggingAdapter, Adapter):
     """Ethereum adapter, Sepolia by default. One adapter instance per network.
 
-    Keys never leave the adapter. The constructor key (or SEPOLIA_PRIVATE_KEY)
-    is the default identity; a session may bring its own key as raw auth material.
+    Keys never leave the adapter. The constructor key (or SEPOLIA_PRIVATE_KEY) is the
+    key a session uses when it opens without key material; nothing signs without an
+    open session. read_urls (or readers) add independent read endpoints: every read
+    that verification relies on must agree across all of them, or verification fails.
     """
 
-    def __init__(self, rpc_url: Optional[str] = None, private_key: Optional[str] = None, w3=None):
+    def __init__(self, rpc_url: Optional[str] = None, private_key: Optional[str] = None, w3=None,
+                 read_urls: Optional[list[str]] = None, readers: Optional[list] = None):
         super().__init__()
         if not _WEB3_AVAILABLE:
             raise PlugError("not_found", "web3 not installed; pip install web3")
@@ -116,12 +119,31 @@ class LiveAdapter(LoggingAdapter, Adapter):
             w3 = Web3(Web3.HTTPProvider(self.rpc_url))
             w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         self.w3 = w3
+        self._readers = [w3] + [self._connect(u) for u in (read_urls or [])] + list(readers or [])
         self._keys: dict[str, str] = {}    # checksum address -> private key
         self._dids: dict[str, str] = {}    # session DID -> checksum address
         self._nonces: dict[str, int] = {}
         self._bound: Optional[str] = None
         default = private_key or os.environ.get("SEPOLIA_PRIVATE_KEY", "")
         self.address: Optional[str] = self._add_key(default) if default else None
+
+    @staticmethod
+    def _connect(url: str):
+        w3 = Web3(Web3.HTTPProvider(url))
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        return w3
+
+    def _agreed(self, read, what: str):
+        """read(w3) on every endpoint; the answer only when all agree. Any failure or disagreement fails closed."""
+        answers = []
+        for w3 in self._readers:
+            try:
+                answers.append(read(w3))
+            except Exception as e:
+                raise PlugError("not_found", f"{what} not found ({type(e).__name__})") from e
+        if any(a != answers[0] for a in answers[1:]):
+            raise PlugError("proof_invalid", f"read endpoints disagree on {what}")
+        return answers[0]
 
     def _add_key(self, key: str) -> str:
         try:
@@ -132,14 +154,13 @@ class LiveAdapter(LoggingAdapter, Adapter):
         return address
 
     def _key_for(self, did: Optional[str]) -> tuple[str, str]:
-        address = self._dids.get(did or "")
-        if address is None and did:
-            named = issuer_address(did)
-            address = named if named in self._keys else None
-        if address is None and did in (None, "", "did:plug:anon"):
-            address = self.address
+        """The key of the session bound to this call. A caller-named issuer must be that session's identity,
+        in any DID form naming the same account; a key loaded earlier is never used without its session."""
+        address = self._dids.get(self._bound or "")
         if address is None:
-            raise PlugError("auth_failed", f"no key for {did or 'anonymous caller'}")
+            raise PlugError("auth_failed", "signing needs an open session on this network")
+        if did and did != self._bound and issuer_address(did) != address:
+            raise PlugError("auth_failed", f"{did} is not the open session's identity")
         return address, self._keys[address]
 
     def _next_nonce(self, address: str) -> int:
@@ -165,12 +186,16 @@ class LiveAdapter(LoggingAdapter, Adapter):
         return "live:" + _hex(tx_hash), receipt
 
     def _finality(self, block: int) -> dict:
-        info = {"confirmations": max(self.w3.eth.block_number - block + 1, 0)}
-        try:
-            finalized = self.w3.eth.get_block("finalized")["number"]
-        except Exception:
-            return dict(info, kind="probabilistic")
-        return dict(info, kind="final" if block <= finalized else "probabilistic")
+        """The weakest finality any read endpoint reports: fewest confirmations, final only if all say so."""
+        confirmations, final = None, True
+        for w3 in self._readers:
+            seen = max(w3.eth.block_number - block + 1, 0)
+            confirmations = seen if confirmations is None else min(confirmations, seen)
+            try:
+                final = final and block <= w3.eth.get_block("finalized")["number"]
+            except Exception:
+                final = False
+        return {"confirmations": confirmations, "kind": "final" if final else "probabilistic"}
 
     def bind(self, subject: Optional[str]) -> None:
         self._bound = subject
@@ -228,16 +253,14 @@ class LiveAdapter(LoggingAdapter, Adapter):
 
     def query(self, ref: StateRef, fields: Optional[list] = None) -> Receipt:
         tx_hex = ref.address[5:] if ref.address.startswith("live:") else ref.address
-        try:
-            receipt = self.w3.eth.get_transaction_receipt(tx_hex)
-            tx = self.w3.eth.get_transaction(tx_hex)
-        except Exception as e:
-            # Upstream text can carry the RPC URL, and with it a provider API key; it never leaves the adapter.
-            raise PlugError("not_found", f"transaction {tx_hex} not found ({type(e).__name__})") from e
-        status, err = chain_status(receipt.status)
-        data = {"block": receipt.blockNumber, "status": receipt.status,
-                "from": tx["from"], "to": tx["to"], "data": _hex(tx["input"]),
-                "finality": self._finality(receipt.blockNumber)}
+        def read(w3):
+            receipt, tx = w3.eth.get_transaction_receipt(tx_hex), w3.eth.get_transaction(tx_hex)
+            return {"block": receipt.blockNumber, "status": receipt.status,
+                    "from": tx["from"], "to": tx["to"], "data": _hex(tx["input"])}
+        # Upstream text can carry the RPC URL, and with it a provider API key; it never leaves the adapter.
+        data = self._agreed(read, f"transaction {tx_hex}")
+        status, err = chain_status(data["status"])
+        data["finality"] = self._finality(data["block"])
         if fields:
             data = {k: data[k] for k in fields if k in data}
         self.log.append({"op": "query", "tx": ref.address})
@@ -275,15 +298,19 @@ class LiveAdapter(LoggingAdapter, Adapter):
             return reject("proof_invalid: anchor is on another network")
         try:
             found = self.query(att.anchor)
-        except PlugError:
-            return reject(f"not_found: anchor {att.anchor.address}")
+        except PlugError as e:
+            return reject(f"not_found: anchor {att.anchor.address}" if e.code == "not_found"
+                          else f"{e.code}: {e.message}")
         if found.status != Status.OK:
             return reject("proof_invalid: anchor transaction failed")
         if Web3.to_checksum_address(found.data["from"]) != detail:
             return reject("proof_invalid: anchor was sent by another key")
         if found.data["data"] != "0x" + statement:
             return reject("proof_invalid: anchor does not carry the statement")
-        stamp = self.w3.eth.get_block(found.data["block"])["timestamp"]
+        try:
+            stamp = self._agreed(lambda w3: w3.eth.get_block(found.data["block"])["timestamp"], "anchor block time")
+        except PlugError as e:
+            return reject(f"{e.code}: {e.message}")
         anchored = datetime.fromtimestamp(stamp, timezone.utc)
         _, err = registry_key_status(data, att.issuer, detail, anchored)
         if err:
