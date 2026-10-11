@@ -257,9 +257,9 @@ def test_trust_registry_passthrough():
 
     missing = p.check(att, trust_registry=StateRef("testnet", "stub:0xmissing", "event"))
     assert missing["valid"] is False and "not_found" in (missing["receipt"].error or "")
-    found = p.check(att, trust_registry=r.state_ref)
-    assert found["valid"] is False
-    assert found["receipt"].data["trust_registry"]["address"] == r.state_ref.address
+    not_a_registry = p.check(att, trust_registry=r.state_ref)
+    assert not_a_registry["valid"] is False
+    assert "issuers must be a non-empty list" in not_a_registry["receipt"].error, "fails closed, never ignored"
 
 def test_watch_delivers_matching_events():
     p = setup()

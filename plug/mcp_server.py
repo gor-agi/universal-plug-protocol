@@ -11,7 +11,9 @@ Run:  python -m plug.mcp_server --config plug-mcp.json   (stdio transport)
 from __future__ import annotations
 import argparse
 import json
+import logging
 import os
+import re
 from typing import Any, Optional
 
 from .core import Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type
@@ -26,9 +28,20 @@ def _ref_json(ref: Optional[StateRef]) -> Optional[dict]:
     return {"network": ref.network, "address": ref.address, "kind": ref.kind} if ref else None
 
 
+_LOG = logging.getLogger("plug.mcp_server")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# Meta keys an adapter dereferences (fetches). Only the operator may set them, never the model.
+_OPERATOR_META = ("status",)
+
+
+def _redact(text: Optional[str]) -> Optional[str]:
+    """Errors reach the model; URLs in them (RPC endpoints with API keys, internal hosts) do not."""
+    return _URL.sub("<url>", text) if text else text
+
+
 def receipt_json(r: Receipt) -> dict:
     return {"spec_version": r.spec_version, "op": r.op, "status": r.status.value, "network": r.network,
-            "state_ref": _ref_json(r.state_ref), "data": r.data, "error": r.error, "seq": r.seq}
+            "state_ref": _ref_json(r.state_ref), "data": r.data, "error": _redact(r.error), "seq": r.seq}
 
 
 def attestation_json(r: Receipt) -> dict:
@@ -86,6 +99,9 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
         return ft
 
     def server_meta(meta: Optional[dict]) -> dict:
+        refused = [k for k in (meta or {}) if k in _OPERATOR_META]
+        if refused:
+            raise PlugError("not_authorized", f"meta {', '.join(refused)} is set by the operator, not the model")
         out = {k: v for k, v in (meta or {}).items() if k not in _MODEL_META and not str(k).startswith("_")}
         out.update(stamp)
         return out
@@ -94,7 +110,10 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
         try:
             return fn()
         except PlugError as e:
-            return {"error": f"{e.code}: {e.message}", "retryable": e.retries}
+            return {"error": _redact(f"{e.code}: {e.message}"), "retryable": e.retries}
+        except Exception:
+            _LOG.exception("tool call failed")  # details, URLs included, stay in the operator's log
+            return {"error": "operation failed", "retryable": False}
 
     @server.tool(description="Record a fact. Returns the receipt and an attestation to pass to check.")
     def prove(fact: Any, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> dict:

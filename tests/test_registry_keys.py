@@ -108,9 +108,10 @@ def test_ledger_registry_keys_are_enforced():
 
     ref = StateRef("ledger", "registry-1", "asset")
     att = signed(key, sha256_hex(b"pid"))
-    for record in ({"issuers": [ISSUER], "keys": revoked}, {"keys": revoked}):
-        data = resolve_trust_registry(query(record), ref, "eudi", ISSUER)
-        assert data["trust_registry"]["keys"] == revoked
-        assert check_signature(att, "eudi", data).error.startswith("proof_invalid: key not valid at")
+    data = resolve_trust_registry(query({"issuers": [ISSUER], "keys": revoked}), ref, "eudi", ISSUER)
+    assert data["trust_registry"]["keys"] == revoked
+    assert check_signature(att, "eudi", data).error.startswith("proof_invalid: key not valid at")
+    keys_only = resolve_trust_registry(query({"keys": revoked}), ref, "eudi", ISSUER)
+    assert keys_only.status == Status.REJECTED and "issuers" in keys_only.error
     bad = resolve_trust_registry(query({"issuers": [ISSUER], "keys": {ISSUER: []}}), ref, "eudi", ISSUER)
     assert bad.status == Status.REJECTED and "trust registry keys" in bad.error

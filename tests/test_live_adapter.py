@@ -274,3 +274,13 @@ def test_repeated_bridge_receipt_still_verifies():
     for br in (first, again):
         v = p.check(br)
         assert v["valid"] is True, v["receipt"].error
+
+
+def test_ledger_record_that_is_not_a_registry_restricts_nothing_so_it_is_rejected():
+    p, _, _, _ = setup(ALICE, BOB)
+    operator_tx = p.prove(b"operator registry publication", "doc.sha256").state_ref
+    p.use(p.list_sessions()[0].session_id)
+    attacker = p.prove(b"self-signed claim", "doc.sha256")
+    v = p.check(Attestation.from_receipt(attacker), trust_registry=operator_tx)
+    assert v["valid"] is False and "issuers must be a non-empty list" in v["receipt"].error
+

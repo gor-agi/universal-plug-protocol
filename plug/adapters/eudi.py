@@ -22,6 +22,7 @@ from .base import (
 )
 
 _DEFAULT_STATUS_LIST_POLL = 300  # 5 minutes
+_DEFAULT_STATUS_LIST_MAX_STALE = 3600  # longest a cached token stands in while the list cannot be fetched
 _STATUS_LIST_MAX_BYTES = 1 << 20          # fetched Status List Token
 _STATUS_LIST_MAX_DECODED = 16 << 20       # decompressed status byte array
 _STATUS_NAMES = {1: "revoked", 2: "suspended"}
@@ -91,11 +92,15 @@ class EudiAdapter(InMemoryAdapter):
     ----------
     trusted_lists : list of trusted-list URLs, each a registry document {"issuers": [...], "keys": {...}}
     status_list_poll : most seconds a fetched Status List Token is reused (a shorter token ttl wins)
+    status_list_max_stale : most seconds a cached token stands in while a fresh one cannot be fetched or
+               verified (a shorter token ttl wins); never past the token's exp
     credential_formats : accepted formats (sd-jwt-vc, mso-mdoc)
 
     A credential that references a status list carries meta {"status": {"status_list": {"idx", "uri"}}}
     (IETF Token Status List). The Status List Token must be a statuslist+jwt signed with ES256 or EdDSA by
-    a key of the attestation's issuer: its did:key, or a key the trust registry lists for it.
+    a key of the attestation's issuer: its did:key, or a key the trust registry lists for it. The status list
+    is fetched only after the credential's own signature verifies, and a token older than one already seen
+    is refused.
     """
 
     tx_prefix = "eudi"
@@ -103,10 +108,12 @@ class EudiAdapter(InMemoryAdapter):
 
     def __init__(self, trusted_lists: Optional[list[str]] = None,
                  status_list_poll: int = _DEFAULT_STATUS_LIST_POLL,
-                 credential_formats: Optional[list[str]] = None):
+                 credential_formats: Optional[list[str]] = None,
+                 status_list_max_stale: int = _DEFAULT_STATUS_LIST_MAX_STALE):
         super().__init__()
         self.trusted_lists = trusted_lists or []
         self.status_list_poll = status_list_poll
+        self.status_list_max_stale = status_list_max_stale
         self.credential_formats = credential_formats or ["sd-jwt-vc", "mso-mdoc"]
         self._status_tokens: dict[str, tuple] = {}  # uri -> (parsed token, fetched at)
 
@@ -116,26 +123,65 @@ class EudiAdapter(InMemoryAdapter):
             raise PlugError("unsupported_op", f"credential format {fmt} not accepted")
         return super().attest(network, att)
 
-    def _status_list_token(self, uri: str) -> tuple:
-        """FAIL-CLOSED: a fresh token, else a cached one that has not expired, else raise."""
+    @staticmethod
+    def _within(claims: dict, age: float, limit: float, now: float) -> bool:
+        ttl = claims.get("ttl")
+        if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl > 0:
+            limit = min(limit, ttl)
+        return age < limit and not _expired(claims, now)
+
+    def _status_list(self, uri: str, att: Attestation, data: dict) -> dict:
+        """Claims of a verified Status List Token for this credential. FAIL-CLOSED: a fresh verified token,
+        else a cached verified one within ttl and status_list_max_stale and before exp, else raise."""
         now = time.time()
         cached = self._status_tokens.get(uri)
-        if cached:
-            claims, fetched = cached[0][1], cached[1]
-            ttl = claims.get("ttl")
-            fresh_for = min(self.status_list_poll, ttl) if isinstance(ttl, (int, float)) and ttl > 0 else self.status_list_poll
-            if now - fetched < fresh_for and not _expired(claims, now):
-                return cached[0]
+        if cached and self._within(cached[0][1], now - cached[1], self.status_list_poll, now):
+            return self._validated(cached[0], uri, att, data, now)
         try:
-            raw = fetch_document(uri, accept="application/statuslist+jwt", max_bytes=_STATUS_LIST_MAX_BYTES,
-                                 what="status list")
+            try:
+                raw = fetch_document(uri, accept="application/statuslist+jwt", max_bytes=_STATUS_LIST_MAX_BYTES,
+                                     what="status list")
+            except PlugError as e:
+                raise PlugError(e.code, f"status list unreachable: {e.message}") from e
             parsed = parse_status_list_token(raw.decode("ascii", "replace"))
+            claims = self._validated(parsed, uri, att, data, now)
+            if cached and claims["iat"] < cached[0][1]["iat"]:
+                raise PlugError("proof_invalid", "status list token is older than one already seen")
         except PlugError:
-            if cached and not _expired(cached[0][1], now):
-                return cached[0]  # stale but unexpired copy
-            raise  # no usable copy -> fail closed
+            if cached and self._within(cached[0][1], now - cached[1], self.status_list_max_stale, now):
+                return self._validated(cached[0], uri, att, data, now)
+            raise
         self._status_tokens[uri] = (parsed, now)
-        return parsed
+        return claims
+
+    @staticmethod
+    def _validated(parsed: tuple, uri: str, att: Attestation, data: dict, now: float) -> dict:
+        """The token's claims once its type, subject, times, and issuer signature hold; else raise."""
+        header, claims, signing_input, signature = parsed
+        if header.get("typ") != "statuslist+jwt":
+            raise PlugError("proof_invalid", "status list token typ is not statuslist+jwt")
+        if claims.get("sub") != uri:
+            raise PlugError("proof_invalid", "status list token sub does not match the reference uri")
+        if not isinstance(claims.get("iat"), (int, float)) or isinstance(claims.get("iat"), bool):
+            raise PlugError("proof_invalid", "status list token has no iat")
+        if _expired(claims, now):
+            raise PlugError("proof_invalid", "status list token expired")
+        from ..suites import issuer_key, verify_jws
+        listed = (((data.get("trust_registry") or {}).get("keys") or {}).get(att.issuer)) or []
+        keys = [e["verification_method"] for e in listed]
+        own = issuer_key(att.issuer)
+        if own and own.startswith("did:key:"):
+            keys.append(own)
+        kid = header.get("kid")
+        named = [k for k in keys if kid in (k, k.split("#", 1)[0])]
+        signer = next((k for k in (named or keys)
+                       if verify_jws(signing_input, signature, header.get("alg", ""), k)), None)
+        if signer is None:
+            raise PlugError("proof_invalid", "status list token is not signed by a key of the issuer")
+        _, err = registry_key_status(data, att.issuer, signer, datetime.fromtimestamp(now, timezone.utc))
+        if err:
+            raise PlugError("proof_invalid", f"{err.removeprefix('proof_invalid: ')} (status list token)")
+        return claims
 
     @staticmethod
     def _status_reference(att: Attestation) -> Optional[tuple[int, str]]:
@@ -160,34 +206,7 @@ class EudiAdapter(InMemoryAdapter):
             if ref is None:
                 return None
             idx, uri = ref
-            try:
-                header, claims, signing_input, signature = self._status_list_token(uri)
-            except PlugError as e:
-                return f"{e.code}: status list unreachable: {e.message}"
-            now = time.time()
-            if header.get("typ") != "statuslist+jwt":
-                return "proof_invalid: status list token typ is not statuslist+jwt"
-            if claims.get("sub") != uri:
-                return "proof_invalid: status list token sub does not match the reference uri"
-            if not isinstance(claims.get("iat"), (int, float)) or isinstance(claims.get("iat"), bool):
-                return "proof_invalid: status list token has no iat"
-            if _expired(claims, now):
-                return "proof_invalid: status list token expired"
-            from ..suites import issuer_key, verify_jws
-            listed = (((data.get("trust_registry") or {}).get("keys") or {}).get(att.issuer)) or []
-            keys = [e["verification_method"] for e in listed]
-            own = issuer_key(att.issuer)
-            if own and own.startswith("did:key:"):
-                keys.append(own)
-            kid = header.get("kid")
-            named = [k for k in keys if kid in (k, k.split("#", 1)[0])]
-            signer = next((k for k in (named or keys)
-                           if verify_jws(signing_input, signature, header.get("alg", ""), k)), None)
-            if signer is None:
-                return "proof_invalid: status list token is not signed by a key of the issuer"
-            _, err = registry_key_status(data, att.issuer, signer, datetime.fromtimestamp(now, timezone.utc))
-            if err:
-                return f"{err} (status list token)"
+            claims = self._status_list(uri, att, data)
             bits, array = decode_status_list(claims.get("status_list"))
             value = status_at(bits, array, idx)
         except PlugError as e:
@@ -221,7 +240,12 @@ class EudiAdapter(InMemoryAdapter):
         err = anchor_error(self._store, net, att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
-        err = self._status_error(att, data)
+        # The credential's own signature first: an unverified attestation never makes the adapter fetch.
+        signed = check_signature(att, net, data)
+        if signed.status != Status.OK:
+            return signed
+        err = self._status_error(att, signed.data)
         if err:
-            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
-        return check_signature(att, net, data)
+            rejected = dict(signed.data, verified=False)
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=rejected, error=err)
+        return signed

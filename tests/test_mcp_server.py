@@ -105,3 +105,59 @@ def test_model_cannot_choose_oversight_fact_types_or_its_own_identity():
             assert (await call(client, "prove", fact="y", fact_type="doc.sha256"))["error"].startswith("not_authorized")
             assert (await call(client, "networks"))["fact_types"] == ["agent.action"]
     run(go())
+
+
+def test_model_cannot_point_the_server_at_a_url_through_meta():
+    async def go():
+        async with Client(server()) as client:
+            r = await client.call_tool("prove", {"fact": "x", "fact_type": "doc.sha256",
+                                                 "meta": {"status": {"status_list": {"idx": 0,
+                                                          "uri": "http://169.254.169.254/latest/meta-data"}}}})
+            out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
+            assert out["error"] == "not_authorized: meta status is set by the operator, not the model"
+    run(go())
+
+
+def test_upstream_errors_never_reveal_the_rpc_url():
+    secret = "https://sepolia.example/v3/SUPERSECRETAPIKEY123"
+
+    class Throttled(_FakeW3):
+        def __init__(self):
+            super().__init__()
+
+            def refuse(tx_hash):
+                raise RuntimeError(f"429 Client Error: Too Many Requests for url: {secret}")
+            self.eth.get_transaction_receipt = refuse
+            self.eth.get_transaction = refuse
+
+    p = Plug()
+    p.register_adapter("sepolia", LiveAdapter(w3=Throttled()))
+    p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+
+    async def go():
+        async with Client(build_server(p)) as client:
+            out = await call(client, "check", state_ref={"network": "sepolia", "address": "live:0x" + "ab" * 32,
+                                                         "kind": "event"})
+            assert "SUPERSECRETAPIKEY123" not in json.dumps(out) and out["error"].startswith("not_found")
+    run(go())
+
+
+def test_unexpected_failures_return_a_generic_error():
+    class Broken(_FakeW3):
+        def __init__(self):
+            super().__init__()
+
+            def boom(*a, **k):
+                raise ValueError("node exploded at http://10.0.0.5:8545/?key=SECRET")
+            self.eth.estimate_gas = boom
+
+    p = Plug()
+    p.register_adapter("sepolia", LiveAdapter(w3=Broken()))
+    p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+
+    async def go():
+        async with Client(build_server(p)) as client:
+            r = await client.call_tool("prove", {"fact": "x", "fact_type": "doc.sha256"})
+            out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
+            assert out == {"error": "operation failed", "retryable": False}
+    run(go())

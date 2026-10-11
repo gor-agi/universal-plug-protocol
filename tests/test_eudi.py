@@ -238,3 +238,112 @@ def test_trusted_lists_supply_issuers_and_keys(server):
     down = plug(trusted_lists=[server.url("/tl/a.json"), server.url("/tl/missing.json")])
     v = down.check(provider.credential(down, "z", 0, uri, issuer=did_web), network=NET)
     assert v["valid"] is False and "trusted list" in v["receipt"].error
+
+
+def test_remote_documents_from_private_addresses_are_refused_by_default(server):
+    from plug.adapters import base
+    from plug.adapters.base import fetch_document
+    server.docs["/r"] = ("application/json", "{}")
+    redirect_to_local = Server()
+    try:
+        base.allow_private_networks(False)
+        for url in (server.url("/r"), "http://localhost:%d/r" % server.httpd.server_port,
+                    "http://[::1]:%d/r" % server.httpd.server_port):
+            with pytest.raises(PlugError) as e:
+                fetch_document(url)
+            assert e.value.code in ("not_authorized", "not_found"), url
+        assert server.hits.get("/r", 0) == 0, "no request reaches a private host"
+        issuer, p = Issuer(), plug()
+        uri = publish(server, issuer, "/sl/private", [0])
+        v = p.check(issuer.credential(p, "pid", 0, uri), network=NET)
+        assert v["valid"] is False and "not a public address" in v["receipt"].error
+    finally:
+        base.allow_private_networks(True)
+        redirect_to_local.httpd.shutdown()
+
+
+def test_status_list_is_fetched_only_after_the_credential_signature_verifies(server):
+    issuer, forger, p = Issuer(), Issuer(), plug()
+    uri = publish(server, issuer, "/sl/order", [0])
+    att = Attestation(suites.digest(b"forged"), "identity.pid", issuer.did, NOW(),
+                      meta={"status": {"status_list": {"idx": 0, "uri": uri}}})
+    att.proof = suites.sign(forger.alg, forger.key, statement_hash(att))
+    p.attest(NET, att)
+    assert p.check(att, network=NET)["valid"] is False
+    assert server.hits.get("/sl/order", 0) == 0
+
+
+def test_blocking_the_status_host_cannot_hide_a_revocation_for_long(server):
+    issuer = Issuer()
+    for kw, claims in (({"status_list_poll": 0}, {"ttl": 1}),                              # bounded by ttl
+                       ({"status_list_poll": 0, "status_list_max_stale": 1}, {"ttl": 3600})):  # bounded by max_stale
+        server.down = False
+        p = plug(**kw)
+        path = f"/sl/stale-{len(server.docs)}"
+        uri = publish(server, issuer, path, [0], claims=claims)  # no exp
+        att = issuer.credential(p, path, 0, uri)
+        assert p.check(att, network=NET)["valid"] is True
+        server.docs[path] = ("application/statuslist+jwt", issuer.token(uri, [1], claims=claims))
+        server.down = True
+        assert p.check(att, network=NET)["valid"] is True, "briefly served from cache"
+        time.sleep(1.2)
+        v = p.check(att, network=NET)
+        assert v["valid"] is False and "status list unreachable" in v["receipt"].error, kw
+
+
+def test_an_older_status_list_token_cannot_roll_back_a_revocation(server):
+    issuer, p = Issuer(), plug(status_list_poll=0)
+    uri = server.url("/sl/rollback")
+    older_valid = issuer.token(uri, [0], claims={"iat": int(time.time()) - 600})
+    server.docs["/sl/rollback"] = ("application/statuslist+jwt", issuer.token(uri, [1]))
+    att = issuer.credential(p, "rb", 0, uri)
+    assert p.check(att, network=NET)["receipt"].error == "proof_invalid: revoked via status list"
+    server.docs["/sl/rollback"] = ("application/statuslist+jwt", older_valid)
+    assert p.check(att, network=NET)["receipt"].error == "proof_invalid: revoked via status list"
+    p._adapter(NET).status_list_max_stale = 0  # no cached stand-in: the rollback itself is the error
+    v = p.check(att, network=NET)
+    assert v["receipt"].error == "proof_invalid: status list token is older than one already seen"
+
+
+@pytest.mark.parametrize("peer,allowed", [
+    ("8.8.8.8", True), ("2001:4860:4860::8888", True), ("::ffff:8.8.8.8", True), ("64:ff9b::808:808", True),
+    ("127.0.0.1", False), ("10.0.0.5", False), ("169.254.169.254", False), ("::1", False), ("fe80::1%en0", False),
+    ("::ffff:10.0.0.1", False), ("64:ff9b::a00:5", False), ("64:ff9b::a9fe:a9fe", False), ("64:ff9b:1::a00:5", False),
+])
+def test_peer_address_guard(peer, allowed):
+    from plug.adapters import base
+
+    class Sock:
+        closed = False
+
+        def getpeername(self):
+            return (peer, 80)
+
+        def close(self):
+            self.closed = True
+
+    base.allow_private_networks(False)
+    try:
+        sock = Sock()
+        if allowed:
+            base._check_peer(sock)
+            assert not sock.closed
+        else:
+            with pytest.raises(PlugError, match="not a public address"):
+                base._check_peer(sock)
+            assert sock.closed
+    finally:
+        base.allow_private_networks(True)
+
+
+def test_environment_proxies_are_not_used(server, monkeypatch):
+    from plug.adapters.base import fetch_document
+    proxy = Server()
+    try:
+        monkeypatch.setenv("HTTP_PROXY", proxy.base)
+        monkeypatch.setenv("http_proxy", proxy.base)
+        server.docs["/direct"] = ("application/json", "{}")
+        assert fetch_document(server.url("/direct")) == b"{}"
+        assert proxy.hits == {} and server.hits["/direct"] == 1
+    finally:
+        proxy.httpd.shutdown()

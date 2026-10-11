@@ -232,7 +232,8 @@ class LiveAdapter(LoggingAdapter, Adapter):
             receipt = self.w3.eth.get_transaction_receipt(tx_hex)
             tx = self.w3.eth.get_transaction(tx_hex)
         except Exception as e:
-            raise PlugError("not_found", str(e)) from e
+            # Upstream text can carry the RPC URL, and with it a provider API key; it never leaves the adapter.
+            raise PlugError("not_found", f"transaction {tx_hex} not found ({type(e).__name__})") from e
         status, err = chain_status(receipt.status)
         data = {"block": receipt.blockNumber, "status": receipt.status,
                 "from": tx["from"], "to": tx["to"], "data": _hex(tx["input"]),

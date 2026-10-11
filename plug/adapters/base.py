@@ -6,6 +6,8 @@ Adapters expose a read-only log of completed operations so tests and
 diagnostics can observe behavior without reaching into private attributes.
 """
 from __future__ import annotations
+import http.client
+import ipaddress
 import json
 import urllib.error
 import urllib.request
@@ -184,6 +186,53 @@ def anchor_error(store: dict, network: str, att) -> Optional[str]:
     return "not_found"
 
 
+# Remote documents (registries, status lists) are attacker-influenced URLs. By default they may only be
+# fetched from public addresses; a deployment with internal registries opts in explicitly.
+_FETCH_POLICY = {"allow_private": False}
+
+
+def allow_private_networks(allowed: bool = True) -> None:
+    """Allow or forbid fetching remote documents from loopback, private, link-local, and other non-public addresses."""
+    _FETCH_POLICY["allow_private"] = bool(allowed)
+
+
+_NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+
+
+def _check_peer(sock) -> None:
+    if _FETCH_POLICY["allow_private"]:
+        return
+    address = ipaddress.ip_address(sock.getpeername()[0].split("%", 1)[0])
+    embedded = getattr(address, "ipv4_mapped", None)
+    if embedded is None and address.version == 6 and any(address in n for n in _NAT64):
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)  # the IPv4 host a NAT64 gateway reaches
+    if not (embedded if embedded is not None else address).is_global:
+        sock.close()
+        raise PlugError("not_authorized", "remote document host is not a public address")
+
+
+class _GuardedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        _check_peer(self.sock)  # the address actually connected to, after DNS, on every hop
+
+
+class _GuardedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        super().connect()
+        _check_peer(self.sock)
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_GuardedHTTPConnection, req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_GuardedHTTPSConnection, req, context=self._context)
+
+
 class _RegistryRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urlparse(newurl).scheme not in ("http", "https"):
@@ -258,7 +307,9 @@ def fetch_document(url: str, accept: str = "application/json", max_bytes: int = 
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise PlugError("proof_invalid", f"{what} URL must be http or https")
-    opener = urllib.request.build_opener(_RegistryRedirect)
+    # No environment proxy: the guard must see the target host, not a proxy in front of it.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RegistryRedirect,
+                                         _GuardedHTTPHandler, _GuardedHTTPSHandler)
     req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "plug-trust-registry"})
     try:
         with opener.open(req, timeout=_REGISTRY_TIMEOUT) as resp:
@@ -332,8 +383,8 @@ def check_signature(att, network: str, data: dict) -> Receipt:
 def resolve_trust_registry(query, trust_registry, network: str, issuer: str | None = None):
     """Resolve a registry and attach it to the verify receipt.
 
-    A URL is fetched. A StateRef is queried. When the document lists issuers,
-    the attestation issuer must be one of them. Core does not call this.
+    A URL is fetched. A StateRef is queried, and its record must be ok and list issuers.
+    The attestation issuer must be one of them. Core does not call this.
     Returns a data dict, or a rejected Receipt.
     """
     if trust_registry is None:
@@ -355,25 +406,23 @@ def resolve_trust_registry(query, trust_registry, network: str, issuer: str | No
                            error=f"{e.code}: {e.message}")
         return _membership(issuer, doc["issuers"], doc, network)
     if isinstance(trust_registry, StateRef):
+        # Fail closed: the record must be ok and carry a valid issuers list, or the registry restricts nothing.
         try:
             found = query(trust_registry)
         except PlugError as e:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
-                           error=f"{e.code}: {e.message}")
-        payload = {"network": trust_registry.network, "address": trust_registry.address,
-                   "status": found.status.value}
-        issuers = found.data.get("issuers") if isinstance(found.data, dict) else None
+                           error=f"{e.code}: trust registry {trust_registry.address}: {e.message}")
+        if found.status != Status.OK or not isinstance(found.data, dict):
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
+                           error="proof_invalid: trust registry record is not ok")
         try:
+            issuers = _issuer_list(found.data)
             keys = _registry_keys(found.data)
-            if isinstance(issuers, list):
-                payload["issuers"] = _issuer_list({"issuers": issuers})
         except PlugError as e:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
-                           error=f"{e.code}: {e.message}")
-        if keys:
-            payload["keys"] = keys
-        if isinstance(issuers, list):
-            return _membership(issuer, payload["issuers"], payload, network)
-        return {"trust_registry": payload}
+                           error=f"{e.code}: trust registry record {trust_registry.address}: {e.message}")
+        payload = {"network": trust_registry.network, "address": trust_registry.address,
+                   "status": found.status.value, "issuers": issuers, **({"keys": keys} if keys else {})}
+        return _membership(issuer, issuers, payload, network)
     return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
                    error="proof_invalid: bad trust_registry")
