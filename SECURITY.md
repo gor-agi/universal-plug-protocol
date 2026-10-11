@@ -23,4 +23,5 @@ Out of scope: vulnerabilities in third-party networks or in optional dependencie
 
 - **SM2 signing backend.** The `sm2-sm3` suite performs curve arithmetic through a pure-Python library that is not constant-time. Verification is unaffected. Signing on hosts exposed to timing measurement requires a constant-time backend.
 - **Ledger finality.** Verification reports finality; it does not wait for it. Relying parties choose their own threshold.
+- **Signed scope.** A proof signs the 32-byte subject hash only. `fact_type`, `issued_at`, and `meta` are labels that travel with it, not signed claims. Anchored time comes from the ledger; relying parties that need a signed type or time must commit them inside the fact.
 - **Local DID aliases.** `did:plug` identifiers in local form are meaningful only inside one deployment (see [spec/did-plug.md](spec/did-plug.md)).

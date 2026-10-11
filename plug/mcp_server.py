@@ -14,7 +14,12 @@ import json
 import os
 from typing import Any, Optional
 
-from .core import Attestation, Plug, PlugError, Receipt, StateRef
+from .core import Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type
+
+# Fact types the model may not have the server sign unless the operator allowlists them: oversight evidence
+# about the model itself, and plug.* commitments, which only the plug produces (never allowlistable).
+RESERVED_FACT_TYPES = ("agent.", "control.", "incident.", "plug.")
+_MODEL_META = ("model_family", "model_id")
 
 
 def _ref_json(ref: Optional[StateRef]) -> Optional[dict]:
@@ -47,11 +52,19 @@ def attestation_from_json(d: dict) -> Attestation:
         raise PlugError("proof_invalid", f"malformed attestation: {e}") from e
 
 
-def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: str = "universal-plug"):
-    """An MCP server over an already configured Plug. registries: allowlisted name -> registry URL."""
+def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: str = "universal-plug",
+                 fact_types: Optional[list[str]] = None, model: Optional[dict] = None):
+    """An MCP server over an already configured Plug. registries: allowlisted name -> registry URL.
+
+    fact_types: allowlist of fact types the model may prove; None allows any type outside
+    RESERVED_FACT_TYPES. model: {"model_family", "model_id"} the server stamps into meta, replacing
+    whatever the model sends.
+    """
     from mcp.server.mcpserver import MCPServer
 
     allowed = dict(registries or {})
+    allowed_types = None if fact_types is None else {canon_fact_type(t) for t in fact_types}
+    stamp = {k: str(v) for k, v in (model or {}).items() if k in _MODEL_META}
     server = MCPServer(name, instructions=(
         "Verifiable evidence across networks. prove records a fact and returns an attestation; "
         "check verifies an attestation, a state reference, or a bridge receipt without trusting the issuer; "
@@ -64,6 +77,19 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
             return allowed[value]
         raise PlugError("not_authorized", "trust_registry must be inline or one of: " + ", ".join(sorted(allowed)))
 
+    def admit(fact_type: str) -> str:
+        ft = canon_fact_type(fact_type)
+        if ft.startswith("plug.") or (allowed_types is None and ft.startswith(RESERVED_FACT_TYPES)):
+            raise PlugError("not_authorized", f"fact type {ft} is reserved")
+        if allowed_types is not None and ft not in allowed_types:
+            raise PlugError("not_authorized", f"fact type {ft} is not allowed by this server")
+        return ft
+
+    def server_meta(meta: Optional[dict]) -> dict:
+        out = {k: v for k, v in (meta or {}).items() if k not in _MODEL_META and not str(k).startswith("_")}
+        out.update(stamp)
+        return out
+
     def guarded(fn):
         try:
             return fn()
@@ -73,14 +99,14 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
     @server.tool(description="Record a fact. Returns the receipt and an attestation to pass to check.")
     def prove(fact: Any, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> dict:
         def run():
-            r = plug.prove(fact, fact_type, network, meta)
+            r = plug.prove(fact, admit(fact_type), network, server_meta(meta))
             return {"receipt": receipt_json(r), "attestation": attestation_json(r), "salt": r.data.get("salt")}
         return guarded(run)
 
     @server.tool(description="Record many facts under one anchor. Returns one attestation per fact.")
     def prove_batch(facts: list, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> dict:
         def run():
-            rs = plug.prove_batch(facts, fact_type, network, meta)
+            rs = plug.prove_batch(facts, admit(fact_type), network, server_meta(meta))
             return {"anchor": _ref_json(rs[0].state_ref), "status": rs[0].status.value,
                     "attestations": [attestation_json(r) for r in rs],
                     "salts": [r.data.get("salt") for r in rs]}
@@ -110,10 +136,13 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
     def watch(state_ref: dict, filter: Optional[list] = None) -> dict:
         return guarded(lambda: {"handle": plug.watch(StateRef(**state_ref), filter)})
 
-    @server.tool(description="Registered networks, the active session subject, and allowlisted trust registries.")
+    @server.tool(description="Registered networks, the active session subject, allowlisted trust registries, "
+                             "and the fact types this server will prove.")
     def networks() -> dict:
         s = plug.active()
         return {"networks": sorted(plug._adapters), "registries": sorted(allowed),
+                "fact_types": sorted(allowed_types) if allowed_types is not None else None,
+                "reserved_fact_types": list(RESERVED_FACT_TYPES),
                 "active": {"network": s.network, "subject": s.credential_subject} if s else None}
 
     return server
@@ -122,7 +151,9 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
 def plug_from_config(config: dict) -> tuple[Plug, dict]:
     """Plug from a JSON config. Secrets are named by environment variable, never written in the file:
     {"hash_alg": "sha-256", "commitment": "plain", "registries": {"eu": "https://..."},
+     "fact_types": ["doc.sha256"], "model": {"model_family": "...", "model_id": "..."},
      "networks": {"sepolia": {"adapter": "live", "rpc_url_env": "SEPOLIA_RPC_URL", "key_env": "SEPOLIA_PRIVATE_KEY"}}}
+    fact_types and model are read by main() and passed to build_server.
     """
     plug = Plug(hash_alg=config.get("hash_alg", "sha-256"), commitment=config.get("commitment", "plain"))
     for name, spec in (config.get("networks") or {}).items():
@@ -150,8 +181,9 @@ def main(argv=None):
     parser.add_argument("--config", required=True, help="JSON config; secrets come from environment variables")
     args = parser.parse_args(argv)
     with open(args.config) as f:
-        plug, registries = plug_from_config(json.load(f))
-    build_server(plug, registries).run("stdio")
+        config = json.load(f)
+    plug, registries = plug_from_config(config)
+    build_server(plug, registries, fact_types=config.get("fact_types"), model=config.get("model")).run("stdio")
 
 
 if __name__ == "__main__":

@@ -239,12 +239,16 @@ def resolve_trust_registry(query, trust_registry, network: str, issuer: str | No
         payload = {"network": trust_registry.network, "address": trust_registry.address,
                    "status": found.status.value}
         issuers = found.data.get("issuers") if isinstance(found.data, dict) else None
-        if isinstance(issuers, list):
-            try:
+        try:
+            keys = _registry_keys(found.data)
+            if isinstance(issuers, list):
                 payload["issuers"] = _issuer_list({"issuers": issuers})
-            except PlugError as e:
-                return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
-                               error=f"{e.code}: {e.message}")
+        except PlugError as e:
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
+                           error=f"{e.code}: {e.message}")
+        if keys:
+            payload["keys"] = keys
+        if isinstance(issuers, list):
             return _membership(issuer, payload["issuers"], payload, network)
         return {"trust_registry": payload}
     return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,

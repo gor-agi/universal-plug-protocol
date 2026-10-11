@@ -254,6 +254,21 @@ def bridge_commitment(src: "StateRef", hash_alg: str = "sha-256") -> str:
                                              "kind": src.kind}}).encode("utf-8"), hash_alg)
 
 
+def batch_commitment(root: str, size: int, hash_alg: str = "sha-256") -> str:
+    """Subject hash anchored for a batch: binds the RFC 9162 root and tree size under the plug.batch domain,
+    so no single-fact subject can be presented as a batch root."""
+    return digest(canonical({"plug.batch": {"root": root, "size": size}}).encode("utf-8"), hash_alg)
+
+
+_RESERVED_FACT_PREFIX = b'{"plug.'
+
+
+def _check_not_reserved(data: bytes) -> None:
+    """Facts whose bytes open like a plug.* commitment are refused, keeping that domain to the plug itself."""
+    if data.startswith(_RESERVED_FACT_PREFIX):
+        raise PlugError("unsupported_op", "facts in the reserved plug.* commitment domain cannot be proven")
+
+
 # ---- batch anchoring: RFC 9162 Merkle tree hash and inclusion proofs ----
 
 def _h(data: bytes, alg: str) -> bytes:
@@ -401,6 +416,7 @@ class Plug:
         self._active: Optional[str] = None
         self._seq = 0                      # monotonic ordering signal; stamped into state-ref addresses by adapters
         self._idempotency: dict[str, tuple] = {}  # hash -> (receipt, timestamp)
+        self._batch_salts: dict[str, tuple] = {}  # salted batch key -> (salts, timestamp); memory only
         self._pred_window: dict[str, list] = {}    # market -> [(family, ts)]
         self._mono_warned: dict[str, float] = {}  # market -> last warning timestamp (24h cooldown)
 
@@ -457,6 +473,7 @@ class Plug:
     def _evict_idempotency(self):
         now = time.time()
         self._idempotency = {k: v for k, v in self._idempotency.items() if now - v[1] < 86400}
+        self._batch_salts = {k: v for k, v in self._batch_salts.items() if now - v[1] < 86400}
 
     def idempotency_keys(self) -> list[str]:
         """Public read-only view of the idempotency cache for tests and diagnostics."""
@@ -545,10 +562,12 @@ class Plug:
         root, err = _inclusion_root(att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
-        batch = replace(att, subject_hash=root, inclusion=None, meta=dict(att.meta))
+        size = int(att.inclusion["size"])
+        anchored = batch_commitment(root, size, att.hash_alg)
+        batch = replace(att, subject_hash=anchored, inclusion=None, meta=dict(att.meta))
         r = self._adapter(net).verify(batch, net, trust_registry)
-        data = dict(r.data, subject_hash=att.subject_hash, batch_root=root,
-                    leaf_index=int(att.inclusion["index"]), batch_size=int(att.inclusion["size"]))
+        data = dict(r.data, subject_hash=att.subject_hash, batch_root=root, batch_commitment=anchored,
+                    leaf_index=int(att.inclusion["index"]), batch_size=size)
         return Receipt(r.spec_version, r.op, r.status, r.network, r.state_ref, data, r.error, r.seq)
 
     def _bind(self, adapter: Adapter, network: str) -> Adapter:
@@ -591,7 +610,9 @@ class Plug:
 
     # ---- user-facing verbs ----
     def prove(self, fact: Any, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> Receipt:
-        plain = digest(fact_bytes(fact), self.hash_alg)
+        raw = fact_bytes(fact)
+        _check_not_reserved(raw)
+        plain = digest(raw, self.hash_alg)
         salt = secrets.token_bytes(32).hex() if self.commitment == "salted" else None
         subject = commitment(fact, salt, self.hash_alg) if salt else plain
         att = Attestation(subject_hash=subject, fact_type=fact_type,
@@ -602,27 +623,43 @@ class Plug:
 
     def prove_batch(self, facts: list, fact_type: str, network: Optional[str] = None,
                     meta: Optional[dict] = None) -> list[Receipt]:
-        """prove for many facts with one anchor: the RFC 9162 root is attested and signed once,
-        and each fact's receipt carries its inclusion proof. Not a new operation."""
+        """prove for many facts with one anchor: a commitment to the RFC 9162 root is attested and signed
+        once, and each fact's receipt carries its inclusion proof. Not a new operation."""
         if not facts:
             raise ValueError("prove_batch needs at least one fact")
-        plains = [digest(fact_bytes(f), self.hash_alg) for f in facts]
-        salts = [secrets.token_bytes(32).hex() if self.commitment == "salted" else None for _ in facts]
+        raws = [fact_bytes(f) for f in facts]
+        for raw in raws:
+            _check_not_reserved(raw)
+        plains = [digest(raw, self.hash_alg) for raw in raws]
+        issuer = self.active().credential_subject if self.active() else "did:plug:anon"
+        ft = canon_fact_type(fact_type)
+        net = self._resolve_network(network)
+        salts = [None] * len(facts)
+        batch_key = None
+        if self.commitment == "salted":
+            # A retry reuses the first call's salts (memory only), so it reproduces the anchored root.
+            plain_root = merkle_root([bytes.fromhex(p) for p in plains], self.hash_alg).hex()
+            batch_key = sha256_hex(canonical({"network": net, "issuer": issuer, "fact_type": ft,
+                                              "plain_root": plain_root, "hash_alg": self.hash_alg}))
+            self._evict_idempotency()
+            cached = self._batch_salts.get(batch_key)
+            salts = list(cached[0]) if cached else [secrets.token_bytes(32).hex() for _ in facts]
         subjects = [commitment(f, s, self.hash_alg) if s else p for f, s, p in zip(facts, salts, plains)]
         leaves = [bytes.fromhex(s) for s in subjects]
         root = merkle_root(leaves, self.hash_alg).hex()
-        issuer = self.active().credential_subject if self.active() else "did:plug:anon"
-        ft = canon_fact_type(fact_type)
-        batch = Attestation(subject_hash=root, fact_type="plug.batch", issuer=issuer,
+        batch = Attestation(subject_hash=batch_commitment(root, len(leaves), self.hash_alg),
+                            fact_type="plug.batch", issuer=issuer,
                             issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             meta=dict(meta or {}, batch_size=len(facts), batch_fact_type=ft), hash_alg=self.hash_alg)
-        plain_root = merkle_root([bytes.fromhex(p) for p in plains], self.hash_alg).hex()
-        r = self._attest(network, batch, idem_subject=plain_root if self.commitment == "salted" else None)
+        r = self._attest(net, batch)
+        if batch_key and r.status in (Status.OK, Status.PENDING):
+            self._batch_salts[batch_key] = (salts, time.time())
         receipts = []
         for i, subject in enumerate(subjects):
             data = {"subject_hash": subject, "fact_type": ft, "issuer": issuer, "hash_alg": self.hash_alg,
-                    "issued_at": batch.issued_at,
+                    "issued_at": r.data.get("issued_at", batch.issued_at),
                     "proof": dict(r.data.get("proof") or {}), "batch_root": root,
+                    "batch_commitment": batch.subject_hash,
                     "inclusion": {"tree": "rfc9162", "index": i, "size": len(subjects), "root": root,
                                   "path": [p.hex() for p in merkle_path(i, leaves, self.hash_alg)]}}
             if salts[i]:

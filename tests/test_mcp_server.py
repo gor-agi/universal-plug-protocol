@@ -75,3 +75,32 @@ def test_batch_over_mcp_and_registry_allowlist():
                                 trust_registry={"issuers": [out["attestations"][0]["issuer"]]})
             assert inline["valid"] is True
     run(go())
+
+
+def test_model_cannot_choose_oversight_fact_types_or_its_own_identity():
+    async def go():
+        seen = []
+
+        class Recording(Plug):
+            def prove(self, fact, fact_type, network=None, meta=None):
+                seen.append(dict(meta or {}))
+                return super().prove(fact, fact_type, network, meta)
+
+        p = Recording()
+        p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
+        p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+        stamped = build_server(p, model={"model_family": "family-a", "model_id": "m-7"})
+        async with Client(stamped) as client:
+            for ft in ("agent.action", "agent.review", "control.resume", "incident.report", "plug.batch"):
+                out = await call(client, "prove", fact="x", fact_type=ft)
+                assert out.get("error", "").startswith("not_authorized"), ft
+            out = await call(client, "prove", fact="x", fact_type="doc.sha256",
+                             meta={"model_family": "family-b", "_seq": 99, "note": "kept"})
+            assert out["receipt"]["status"] == "ok"
+        assert seen == [{"model_family": "family-a", "model_id": "m-7", "note": "kept"}]
+        allow = build_server(p, fact_types=["agent.action"])
+        async with Client(allow) as client:
+            assert (await call(client, "prove", fact="y", fact_type="agent.action"))["receipt"]["status"] == "ok"
+            assert (await call(client, "prove", fact="y", fact_type="doc.sha256"))["error"].startswith("not_authorized")
+            assert (await call(client, "networks"))["fact_types"] == ["agent.action"]
+    run(go())

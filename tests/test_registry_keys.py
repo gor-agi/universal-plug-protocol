@@ -93,3 +93,23 @@ def test_malformed_registry_keys_are_rejected():
                  ["nope"]):
         v = p.check(att, network="eudi", trust_registry={"issuers": [ISSUER], "keys": keys})
         assert v["valid"] is False and "trust registry keys" in (v["receipt"].error or ""), keys
+
+
+def test_ledger_registry_keys_are_enforced():
+    from plug.adapters.base import check_signature, resolve_trust_registry
+    from plug.core import Receipt, StateRef, Status
+    key = suites.generate_key("ecdsa-p256")
+    vm = suites.sign("ecdsa-p256", key, "00" * 32)["verification_method"]
+    revoked = {ISSUER: [{"verification_method": vm, "valid_until": iso(NOW - timedelta(days=1))}]}
+
+    def query(record):
+        return lambda ref: Receipt("0.2.0", "query", Status.OK, ref.network, ref, record)
+
+    ref = StateRef("ledger", "registry-1", "asset")
+    att = signed(key, sha256_hex(b"pid"))
+    for record in ({"issuers": [ISSUER], "keys": revoked}, {"keys": revoked}):
+        data = resolve_trust_registry(query(record), ref, "eudi", ISSUER)
+        assert data["trust_registry"]["keys"] == revoked
+        assert check_signature(att, "eudi", data).error.startswith("proof_invalid: key not valid at")
+    bad = resolve_trust_registry(query({"issuers": [ISSUER], "keys": {ISSUER: []}}), ref, "eudi", ISSUER)
+    assert bad.status == Status.REJECTED and "trust registry keys" in bad.error
