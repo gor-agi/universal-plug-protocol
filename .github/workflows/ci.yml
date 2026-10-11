@@ -27,7 +27,9 @@ jobs:
       - name: Install SoftHSM2 (PKCS#11 signing tests)
         run: sudo apt-get update && sudo apt-get install -y softhsm2
       - name: Install package
-        run: pip install -e ".[dev,live,suites,mcp,hsm]"
+        run: |
+          pip install -e ".[dev,live,suites,mcp,hsm,eudi]"
+          pip install "sd-jwt @ git+https://github.com/openwallet-foundation-labs/sd-jwt-python.git@c5fda017d15e65a6c61a31e696bcdbdab2966b1e"  # test oracle
       - name: Check vectors are reproducible
         run: scripts/check_vectors.sh
       - name: Run tests with coverage

@@ -8,7 +8,7 @@ A network-agnostic Python core for attestations and identity. Callers use prove,
 - `plug.suites` — signature suites: ecdsa-secp256k1, ed25519, ecdsa-p256, sm2-sm3. Issuer binding for `did:key`, `did:plug`, and `did:pkh`.
 - `plug.adapters.StubAdapter` — in-memory adapter. The test suite uses it. It does not check signatures, and it rejects proofs it cannot check.
 - `plug.adapters.OracleAdapter` — observation-to-attest backend with freshness, jump-bound, and issuer checks.
-- `plug.adapters.EudiAdapter` — EU digital identity wallet profile: trusted lists that supply issuers and their keys, and IETF Token Status Lists. A credential that names a status list in `meta.status.status_list {idx, uri}` verifies only while its status is VALID; the Status List Token must be a `statuslist+jwt` signed (ES256 or EdDSA) by a key of the issuer. An unreachable list with no unexpired cached copy fails closed. Trusted lists here are JSON registries, not signed ETSI trusted lists, and SD-JWT VC and mdoc credentials are gated by format name, not verified (see [docs/threat-model.md](docs/threat-model.md)).
+- `plug.adapters.EudiAdapter` — EU digital identity wallet profile: trusted lists that supply issuers and their keys, and IETF Token Status Lists. A credential that names a status list in `meta.status.status_list {idx, uri}` verifies only while its status is VALID; the Status List Token must be a `statuslist+jwt` signed (ES256 or EdDSA) by a key of the issuer. An unreachable list with no unexpired cached copy fails closed. The adapter's own trusted lists are JSON registries; signed ETSI trusted lists and SD-JWT VC and mdoc credentials are verified by the optional modules below.
 - `plug.adapters.ChainMakerAdapter` — permissioned ledger with certificate-based membership (ChainMaker v3). Anchors statement hashes through a one-opcode EVM contract; verification binds the issuer to the member's P-256 key and reports the member organization and finality.
 - `plug.adapters.LiveAdapter` — Ethereum-family adapter (Sepolia by default). Install the `live` extra. Set `SEPOLIA_RPC_URL`; a session brings its key as raw auth material, and `SEPOLIA_PRIVATE_KEY` is the optional default. Attest signs the attestation's statement hash (subject hash, type, issuer, times, role, and meta), records it on-chain, and sets the attestation's `anchor`. Verify passes only when the signature, the issuer DID, and the on-chain anchor all name the same key and carry the same hash; it reports `anchored_at` and finality.
 - `plug.mcp_server` — Model Context Protocol transport: prove, prove_batch, check, watch, networks. Keys stay server-side; the server, not the model, decides which fact types it proves and sets the model identity. Run `python -m plug.mcp_server --config plug-mcp.json` (install the `mcp` extra).
@@ -50,6 +50,23 @@ print(plug.check(attestation)["valid"])           # False here: the stub holds n
 ```
 
 An explicit network is required when there is no open session. Prove hashes `bytes` as raw bytes. A trust registry is `{"issuers": ["did:..."]}`, passed inline or as a URL fetched by the adapter over http or https. The attestation issuer has to be in that list.
+
+## EU credentials and trusted lists (optional)
+
+Install the `eudi` extra. Both modules are closed by default: no pinned signer or anchors, nothing verifies.
+
+```python
+from plug.trusted_lists import verify_trusted_list
+from plug.credentials import verify_sd_jwt_vc, verify_mdoc
+
+tl = verify_trusted_list(xml, pinned_signer_certs, ["http://uri.etsi.org/TrstSvc/Svctype/CA/QC"])
+cred = verify_sd_jwt_vc(presentation, tl.anchors, audience="https://verifier.example", nonce=nonce)
+plug.trust("eudi", {"issuers": [cred["issuer"]]})   # the credential issuer's key, as a did:key
+```
+
+- `verify_trusted_list` checks an ETSI TS 119 612 list's XAdES signature against signer certificates you pin (from the EU list of trusted lists), its validity window, and returns the certificates of granted services of the types you name as anchors. It reads only the signed content.
+- `verify_sd_jwt_vc` (RFC 9901, SD-JWT VC) checks the issuer's X.509 chain to those anchors, the issuer signature, `typ`, validity, that every disclosure matches exactly one signed digest, and, when you pass an audience or nonce, the key binding JWT.
+- `verify_mdoc` (ISO/IEC 18013-5) checks the chain, the COSE signature, validity, docType, and every disclosed element's digest.
 
 ## Closed by default
 

@@ -20,3 +20,8 @@ Test vectors distributed in spec/vectors/ (see spec/vectors/README.md):
   - rfc9162.json: transparency-dev/merkle, Apache-2.0, Copyright Google LLC
   - status-list-draft21.json: draft-ietf-oauth-status-list-21, Appendix C
     (IETF Trust; code components under the Revised BSD License)
+
+Test data distributed in tests/data/trusted-lists/: the Luxembourg trusted
+list (ILNAS, https://trusted-list.lu/tsl.xml, sequence 66) and the signer
+certificates the EU list of trusted lists publishes for it, public documents
+reused as published.

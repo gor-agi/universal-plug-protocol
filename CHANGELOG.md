@@ -2,6 +2,14 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.4.1
+
+### Added
+
+- `plug.trusted_lists.verify_trusted_list`: ETSI TS 119 612 trusted lists verified with `signxml` against pinned signer certificates, returning anchors of the service types you name. Tested against Luxembourg's live list with the signers the EU list of trusted lists pins.
+- `plug.credentials.verify_sd_jwt_vc` (RFC 9901, SD-JWT VC) and `verify_mdoc` (ISO/IEC 18013-5, via `pymdoccbor`), each requiring an X.509 chain to anchors and returning the issuer as a did:key for trust policies. Tested with credentials issued by `sd-jwt-python` and `pymdoccbor`; `sd-jwt-python` also runs as a reference verifier in CI.
+- The `eudi` extra.
+
 ## 0.4.0
 
 ### Breaking: closed by default
