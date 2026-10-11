@@ -10,27 +10,37 @@ Include the affected version or commit, the component (core, a signature suite, 
 
 | Version | Supported |
 | --- | --- |
-| 0.4.x | Yes |
-| 0.3.x | No: verification trusted any authentic issuer by default |
-| 0.2.x | No: proofs signed only the subject hash, so type, issuer, times, and meta could be relabeled |
-| < 0.2 | No: receipt hashing and canonical form changed |
+| 0.6.x | Yes |
+| < 0.6 | No: the package was `plug`; 0.6 renamed it to `upp` and removed the bridge, settle, and other unsafe or unused surface |
 
 ## Scope
 
-In scope: canonical serialization and hashing, signature suites and issuer binding, receipt and idempotency logic, bridge verification, and the adapters in this repository.
+In scope: canonical serialization and hashing, signature suites and issuer binding, statements and batches, trust
+registries and remote fetching, grants, the ledgers, the MCP server, and the `upp.ext` extensions.
 
-Out of scope: vulnerabilities in third-party networks or in optional dependencies themselves. Report those upstream; reports of how this project uses them are in scope.
+Out of scope: vulnerabilities in third-party networks or in optional dependencies themselves. Report those upstream;
+reports of how this project uses them are in scope.
 
 ## Known limitations
 
-- **SM2 signing backend.** The `sm2-sm3` suite performs curve arithmetic through a pure-Python library that is not constant-time. Verification is unaffected. Signing on hosts exposed to timing measurement requires a constant-time backend; none is installable today on every target platform (see docs/threat-model.md, P4).
-- **Ledger finality.** Verification reports finality; it does not wait for it. Relying parties choose their own threshold.
-- **Signed time is a claim.** A proof signs the attestation's statement: subject hash, type, issuer, `issued_at`, `expires_at`, role, and meta. `issued_at` is the issuer's signed claim, not evidence of when; the anchored time comes from the ledger, and registry keys are judged at it.
-- **Status lists.** The EUDI adapter reads Token Status Lists in JWT form only; a CWT status list, or any token it cannot verify, is rejected. Freshness is judged from the token's signed `iat`: a token older than its `ttl` plus `status_list_max_stale`, or older than `status_list_max_age` (one day by default), is refused, as is a token older than one already seen. When a fresh token cannot be fetched or verified, a cached one stands in only within those bounds and never past `exp`. Whoever can block the status host can therefore delay a revocation by at most that window.
-- **Remote documents.** Registries, trusted lists, and status lists are fetched only from public addresses (IPv4-mapped and NAT64 addresses are judged by the IPv4 host they reach) unless the deployment calls `plug.adapters.base.allow_private_networks()`. Environment and system proxies are not used, so the address checked is the host fetched. Deployments that enable private addresses should allowlist registry URLs, since status list URIs come from credentials.
-- **EUDI scope.** Signed ETSI TS 119 612 trusted lists, SD-JWT VC, and ISO mdoc are verified by `plug.trusted_lists` and `plug.credentials` (the `eudi` extra). Signer certificates for trusted lists must be pinned from a source you already trust. OpenID Federation trust chains are not supported. The EUDI adapter's own `trusted_lists` setting takes JSON registries.
-- **Closed by default.** Verification, remote fetching, signing, and the MCP server are closed until the operator grants access (SPEC, Permissions). `ANY` opens a grant on purpose and is logged on `plug.policy`; review those log lines as you would firewall exceptions.
-- **Key custody.** Attestation proofs can be signed inside an HSM through `Pkcs11Signer` (P-256, Ed25519). Ledger adapters still hold their transaction keys (secp256k1, SM2) in process memory.
-- **Ledger reads.** A ledger adapter with one endpoint trusts it. Give the Ethereum adapter more read endpoints, such as a Helios light client, so that verification reads must agree.
-- **ECDSA malleability.** High-S ECDSA signatures are accepted. Nothing keys on signature bytes, so a second valid signature over the same statement carries the same meaning.
-- **Local DID aliases.** `did:plug` identifiers in local form are meaningful only inside one deployment (see [spec/did-plug.md](spec/did-plug.md)).
+- **No external audit yet.** The code has had repeated internal reviews and third-party test vectors, not an
+  independent audit.
+- **Local ledger time.** `LocalLedger` records its own clock as the anchoring time. It proves order and integrity to
+  whoever trusts the log's keeper; use a public or permissioned ledger when a third party must not.
+- **SM2 signing.** The `sm2-sm3` suite uses a pure-Python library that is not constant-time. Verification is
+  unaffected; do not sign with SM2 on hosts exposed to timing measurement.
+- **Ledger finality and reads.** Verification reports finality; it does not wait for it. A ledger with one read
+  endpoint trusts it; give `EthereumLedger` several (`read_urls`) so reads must agree.
+- **Signed time is a claim.** `issued_at` is the issuer's claim; registry keys are judged at the anchored time.
+- **Status lists.** `upp.ext.eudi.status_lists` reads JWT Token Status Lists only. Freshness comes from the signed
+  `iat` and `ttl`; a cached token stands in for at most `max_stale` seconds when a fresh one cannot be fetched, so
+  whoever can block the status host can delay a revocation by at most that window.
+- **Remote documents.** Registries and status lists are fetched only from hosts allowed with `allow_hosts` and from
+  public addresses (IPv4-mapped and NAT64 addresses judged by the IPv4 host) unless `allow_private_networks()` is
+  called. Proxies are not used, so the address checked is the host fetched.
+- **EUDI scope.** Signer certificates for trusted lists must be pinned from a source you already trust. OpenID
+  Federation trust chains are not supported.
+- **`ANY`.** Every use is logged on the `upp.policy` logger; review those lines as you would firewall exceptions.
+- **Key custody.** Proofs can be signed inside an HSM through `Pkcs11Signer` (P-256, Ed25519). Ethereum and
+  ChainMaker transaction keys are held in process memory.
+- **ECDSA malleability.** High-S signatures are accepted; nothing keys on signature bytes.

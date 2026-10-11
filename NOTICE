@@ -5,12 +5,12 @@ This product includes software developed by the contributors to the
 Universal Plug Protocol project and is licensed under the Apache License,
 Version 2.0 (see LICENSE).
 
-Optional third-party components used at runtime, not distributed with this
-product:
-  - gmssl (BSD) for SM2 curve arithmetic
-  - cryptography (Apache-2.0 OR BSD-3-Clause) for Ed25519 and P-256
-  - web3, eth-account, eth-keys (MIT) for the Ethereum adapter
-  - chainmaker (Apache-2.0) for the ChainMaker adapter
+Third-party components used at runtime, not distributed with this product:
+  - cryptography (Apache-2.0 OR BSD-3-Clause) for Ed25519, P-256, and X.509
+  - optional: gmssl (BSD) for SM2; web3, eth-account, eth-keys (MIT) for
+    Ethereum; chainmaker (Apache-2.0) for ChainMaker; mcp (MIT) for the MCP
+    server; python-pkcs11 (MIT) for HSMs; signxml (Apache-2.0) and
+    pymdoccbor (Apache-2.0) for EUDI credentials
 
 Test vectors distributed in spec/vectors/ (see spec/vectors/README.md):
   - wycheproof/: Project Wycheproof (C2SP/wycheproof), Apache-2.0,

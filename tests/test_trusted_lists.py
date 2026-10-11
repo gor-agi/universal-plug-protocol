@@ -11,8 +11,8 @@ import pytest
 
 pytest.importorskip("signxml")
 
-from plug import ANY, PlugError
-from plug.trusted_lists import verify_trusted_list
+from upp import ANY, PlugError
+from upp.ext.eudi.trusted_lists import verify_trusted_list
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "trusted-lists")
 AT = datetime(2026, 6, 1, tzinfo=timezone.utc)  # between the list's issue (2026-05-20) and next update (2026-11-20)

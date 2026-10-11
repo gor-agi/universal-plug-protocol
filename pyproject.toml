@@ -3,14 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "plug"
-version = "0.5.0"
-description = "Network-agnostic layer for attestations and identity across public, permissioned, enterprise, and sovereign networks."
+name = "universal-plug"
+version = "0.6.0"
+description = "Signed, anchored, checkable evidence for AI agents and anyone else: who did what, on whose authority. Closed by default."
+readme = "README.md"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Gor Vogormyan", email = "gor@agi-brain.com" }]
 maintainers = [{ name = "Gor Vogormyan", email = "gor@agi-brain.com" }]
-dependencies = []
+keywords = ["attestation", "ai-agents", "mcp", "provenance", "verifiable-credentials", "audit", "authorization"]
+dependencies = ["cryptography>=45"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -18,16 +21,28 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
+[project.urls]
+Homepage = "https://github.com/gor-agi/universal-plug-protocol"
+Specification = "https://github.com/gor-agi/universal-plug-protocol/blob/main/SPEC.md"
+Issues = "https://github.com/gor-agi/universal-plug-protocol/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8", "coverage>=7", "rfc8785>=0.1.4", "joserfc>=1.7"]
-live = ["web3>=7.0", "eth-account>=0.13", "eth-keys>=0.5"]
-suites = ["cryptography>=43", "gmssl>=3.2.2"]
+sm2 = ["gmssl>=3.2.2"]
+ethereum = ["web3>=7.0", "eth-account>=0.13", "eth-keys>=0.5"]
 mcp = ["mcp>=2.3"]
-hsm = ["python-pkcs11>=0.9", "cryptography>=43"]
-eudi = ["signxml>=4", "pymdoccbor>=1.4", "cryptography>=45"]
+hsm = ["python-pkcs11>=0.9"]
+eudi = ["signxml>=4", "pymdoccbor>=1.4"]
+chainmaker = ["chainmaker>=3.0.7"]
+dev = ["pytest>=8", "coverage>=7", "pyflakes>=3", "rfc8785>=0.1.4", "joserfc>=1.7"]
+
+[project.scripts]
+upp-mcp = "upp.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["plug"]
+packages = ["upp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["upp", "tests", "spec", "SPEC.md", "README.md", "LICENSE", "NOTICE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

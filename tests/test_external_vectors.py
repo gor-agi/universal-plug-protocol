@@ -8,7 +8,8 @@ import string
 
 import pytest
 
-from plug.core import canonical, digest
+from upp.core import (canonical, digest, merkle_leaf_hash, merkle_path, merkle_root,
+                      merkle_verify_inclusion)
 
 VECTORS = os.path.join(os.path.dirname(__file__), "..", "spec", "vectors")
 
@@ -66,6 +67,32 @@ def test_sm3_reference_digests():
     assert digest(b"abcd" * 16, "sm3") == "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732"
 
 
+# ---- RFC 9162 Merkle trees (transparency-dev/merkle reference roots and inclusion probes) ----
+
+def test_rfc9162_roots_match_reference_for_every_tree_size():
+    doc = json.loads(load("rfc9162.json"))
+    leaves = [bytes.fromhex(x) for x in doc["leaf_inputs"]]
+    for size, want in enumerate(doc["roots_by_size"]):
+        assert merkle_root(leaves[:size]).hex() == want, size
+
+
+def test_rfc9162_inclusion_probes_accept_valid_and_reject_every_corruption():
+    for p in json.loads(load("rfc9162.json"))["inclusion_probes"]:
+        ok = merkle_verify_inclusion(bytes.fromhex(p["leaf_hash"]), p["leaf_index"], p["tree_size"],
+                                     [bytes.fromhex(x) for x in p["proof"]], bytes.fromhex(p["root"]))
+        assert ok is not p["want_error"], (p["file"], p["desc"])
+
+
+def test_rfc9162_generated_paths_verify_for_all_positions():
+    leaves = [bytes.fromhex(x) for x in json.loads(load("rfc9162.json"))["leaf_inputs"]]
+    for size in range(1, len(leaves) + 1):
+        root = merkle_root(leaves[:size])
+        for i in range(size):
+            path = merkle_path(i, leaves[:size])
+            assert merkle_verify_inclusion(merkle_leaf_hash(leaves[i]), i, size, path, root)
+            assert not merkle_verify_inclusion(merkle_leaf_hash(leaves[i] + b"x"), i, size, path, root)
+
+
 # ---- P4: Wycheproof (C2SP/wycheproof) for P-256 (r||s) and Ed25519 ----
 
 def _wycheproof(name):
@@ -74,7 +101,7 @@ def _wycheproof(name):
 
 def test_wycheproof_ecdsa_p256_sha256_p1363():
     pytest.importorskip("cryptography")
-    from plug.suites import _p256_verify
+    from upp.suites import _p256_verify
     doc = _wycheproof("ecdsa_secp256r1_sha256_p1363_test.json")
     checked = 0
     for group in doc["testGroups"]:
@@ -92,7 +119,7 @@ def test_wycheproof_ecdsa_p256_sha256_p1363():
 
 def test_wycheproof_ed25519():
     pytest.importorskip("cryptography")
-    from plug.suites import _ed_verify
+    from upp.suites import _ed_verify
     doc = _wycheproof("ed25519_test.json")
     checked = 0
     for group in doc["testGroups"]:
@@ -110,13 +137,29 @@ def test_wycheproof_ed25519():
 # ---- P7: Token Status List encodings (draft-ietf-oauth-status-list-21, Appendix C) ----
 
 def test_status_list_draft_appendix_c():
-    from plug.adapters.eudi import decode_status_list, status_at
+    from upp.ext.eudi.status_lists import decode_status_list, status_at
     for v in json.loads(load("status-list-draft21.json"))["vectors"]:
         bits, array = decode_status_list({"bits": v["bits"], "lst": v["lst"]})
         assert len(array) * 8 // bits == v["size"], v["section"]
         want = {int(k): s for k, s in v["statuses"].items()}
         nonzero = {i: status_at(bits, array, i) for i in range(v["size"]) if status_at(bits, array, i)}
         assert nonzero == {i: s for i, s in want.items() if s}, v["section"]
+
+
+def test_status_list_rejects_malformed_lists_and_indexes():
+    import base64
+    import zlib
+    from upp.core import PlugError
+    from upp.ext.eudi.status_lists import decode_status_list, status_at
+    lst = base64.urlsafe_b64encode(zlib.compress(b"\x01")).rstrip(b"=").decode()
+    bits, array = decode_status_list({"bits": 1, "lst": lst})
+    assert status_at(bits, array, 0) == 1 and status_at(bits, array, 7) == 0
+    for bad in ({"bits": 3, "lst": lst}, {"bits": True, "lst": lst}, {"bits": 1, "lst": "not zlib"}, [], None):
+        with pytest.raises(PlugError):
+            decode_status_list(bad)
+    for idx in (8, -1, True, "0"):
+        with pytest.raises(PlugError):
+            status_at(bits, array, idx)
 
 
 def test_wycheproof_ecdsa_secp256k1_through_ethereum_recovery():
@@ -126,7 +169,7 @@ def test_wycheproof_ecdsa_secp256k1_through_ethereum_recovery():
     import hashlib
     from eth_keys import keys
     from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-    from plug.suites import _k1_verify
+    from upp.suites import _k1_verify
     doc = _wycheproof("ecdsa_secp256k1_sha256_test.json")
     n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
     mismatches = []

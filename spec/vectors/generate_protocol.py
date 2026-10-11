@@ -13,12 +13,9 @@ from dataclasses import replace
 from itertools import count
 from unittest import mock
 
-from plug import Plug, suites
-from plug.adapters import StubAdapter
-from plug.core import (
-    Attestation, StateRef, batch_commitment, bridge_commitment, canonical, commitment, digest, fact_bytes,
-    statement, statement_hash,
-)
+from upp import Plug, suites
+from upp.core import Attestation, batch_commitment, canonical, commitment, digest, fact_bytes, statement, statement_hash
+from upp.ledgers import LocalLedger
 
 HASH_ALGS = ("sha-256", "sha3-256", "sm3")
 
@@ -46,14 +43,6 @@ def _salted() -> list:
     return out
 
 
-def _bridge() -> list:
-    refs = [StateRef("eip155:11155111", "0x" + "ab" * 32, "event"),
-            StateRef("chainmaker:chain1", "tx-0001", "event"),
-            StateRef("eudi", "eudi:0x" + "cd" * 32, "ownership")]
-    return [{"source": {"network": r.network, "address": r.address, "kind": r.kind}, "hash_alg": alg,
-             "commitment": bridge_commitment(r, alg)} for alg in HASH_ALGS for r in refs]
-
-
 def _batches() -> list:
     sets = [["only"], ["a", "b", "c"], [{"temp": 21.5}, {"temp": 22.0}, "x", b"\x01", [3]],
             [f"reading-{i}" for i in range(8)], [f"r{i}" for i in range(13)]]
@@ -62,20 +51,20 @@ def _batches() -> list:
         for mode in ("plain", "salted"):
             for facts in sets:
                 p = Plug(hash_alg=alg, commitment=mode)
-                p.register_adapter("testnet", StubAdapter())
+                p.register("testnet", LocalLedger())
+                p.open("testnet", {"key": _seed("key:batch")})
                 n = count()
                 deterministic = lambda k: hashlib.sha256(f"{alg}:{mode}:{len(facts)}:{next(n)}".encode()).digest()[:k]
-                with mock.patch("plug.core.secrets.token_bytes", deterministic):
+                with mock.patch("upp.core.secrets.token_bytes", deterministic):
                     receipts = p.prove_batch(facts, "doc.sha256", "testnet")
                 root = receipts[0].data["batch_root"]
                 out.append({
                     "hash_alg": alg, "commitment": mode, "facts": [_encode(f) for f in facts],
                     "salts": [r.data.get("salt") for r in receipts] if mode == "salted" else None,
                     "subjects": [r.data["subject_hash"] for r in receipts], "root": root, "size": len(facts),
-                    "batch_commitment": receipts[0].data["batch_commitment"],
+                    "batch_commitment": batch_commitment(root, len(facts), alg),
                     "inclusion": [{"index": r.data["inclusion"]["index"], "path": r.data["inclusion"]["path"]}
                                   for r in receipts]})
-                assert out[-1]["batch_commitment"] == batch_commitment(root, len(facts), alg)
     return out
 
 
@@ -98,27 +87,25 @@ def _inclusion_negative(batches: list) -> list:
 def _att_json(att: Attestation) -> dict:
     return {"subject_hash": att.subject_hash, "hash_alg": att.hash_alg, "fact_type": att.fact_type,
             "issuer": att.issuer, "issued_at": att.issued_at, "expires_at": att.expires_at,
-            "role": att.role.value if att.role else None, "meta": att.meta, "disclosure": att.disclosure}
+            "meta": att.meta}
 
 
 def _statements() -> list:
     subject = digest(b"statement vectors", "sha-256")
     atts = [
-        Attestation(subject, "doc.sha256", "did:plug:eip155:1:0x" + "11" * 20, "2026-10-11T00:00:00Z"),
+        Attestation(subject, "doc.sha256", "did:pkh:eip155:1:0x" + "11" * 20, "2026-10-11T00:00:00Z"),
         Attestation(subject, "Agent Action", "did:key:z6MkExample", "2026-10-11T12:00:00Z",
-                    expires_at="2027-01-01T00:00:00Z", role="execution",
+                    expires_at="2027-01-01T00:00:00Z",
                     meta={"model_family": " Family-A ", "model_id": "m-7", "tool": "email.send", "n": 3,
                           "ratio": 0.5, "ok": True, "none": None, "nested": {"b": [1, 2], "a": "ü€"},
                           "_seq": 9, "_internal": "excluded"}),
-        Attestation(subject, "identity.pid", "did:web:issuer.example", "2026-10-11T00:00:00+02:00",
-                    disclosure=[{"salt": "aa" * 16, "hash": "bb" * 32}], role="identity"),
+        Attestation(subject, "identity.pid", "did:web:issuer.example", "2026-10-11T00:00:00+02:00"),
     ]
     out = []
     for alg in HASH_ALGS:
         for att in atts:
             a = Attestation(digest(b"statement vectors", alg), att.fact_type, att.issuer, att.issued_at,
-                            expires_at=att.expires_at, role=att.role, meta=dict(att.meta),
-                            disclosure=list(att.disclosure), hash_alg=alg)
+                            expires_at=att.expires_at, meta=dict(att.meta), hash_alg=alg)
             out.append({"attestation": _att_json(a), "statement": canonical(statement(a)),
                         "statement_hash": statement_hash(a)})
     return out
@@ -134,7 +121,7 @@ def _proofs() -> list:
         did = suites.sign(alg, keys[alg], "00" * 32)["verification_method"]
         other_did = suites.sign(alg, other[alg], "00" * 32)["verification_method"]
         base = Attestation(subject, "control.halt", did, "2026-10-11T00:00:00Z",
-                           meta={"actor": "did:plug:agents:a1", "model_family": "family-a"})
+                           meta={"actor": "did:pkh:eip155:1:0x" + "22" * 20, "model_family": "family-a"})
         proof = suites.sign(alg, keys[alg], statement_hash(base))
         cross = "ecdsa-p256" if alg == "ed25519" else "ed25519"
         other_issuer = replace(base, issuer=other_did)
@@ -146,7 +133,6 @@ def _proofs() -> list:
             ("relabeled meta", replace(base, meta=dict(base.meta, model_family="family-b")), proof),
             ("relabeled issued_at", replace(base, issued_at="2020-01-01T00:00:00Z"), proof),
             ("added expires_at", replace(base, expires_at="2999-01-01T00:00:00Z"), proof),
-            ("added role", replace(base, role="execution"), proof),
             ("tampered subject", replace(base, subject_hash=flip(subject)), proof),
             ("tampered signature", base, dict(proof, sig=flip(proof["sig"]))),
             ("issuer names another key", other_issuer, suites.sign(alg, keys[alg], statement_hash(other_issuer))),
@@ -180,11 +166,12 @@ def _proofs() -> list:
 
 
 def _reserved() -> list:
-    facts = [{"plug.batch": {"root": "00" * 32, "size": 1}}, {"plug.bridge": {}}, {"plugin": 1},
-             '{"plug.x":1}', ' {"plug.batch":1}', {"z": 1, "plug.batch": 2}]
+    facts = [{"upp.batch": {"root": "00" * 32, "size": 1}}, {"upp.statement": {}}, {"uppercase": 1},
+             '{"upp.x":1}', ' {"upp.batch":1}', {"z": 1, "upp.batch": 2}]
     out = []
     p = Plug()
-    p.register_adapter("testnet", StubAdapter())
+    p.register("testnet", LocalLedger())
+    p.open("testnet", {"key": _seed("key:reserved")})
     for fact in facts:
         try:
             p.prove(fact, "doc.sha256", "testnet")
@@ -198,7 +185,7 @@ def _reserved() -> list:
 def build() -> dict:
     batches = _batches()
     return {"description": "Protocol vectors produced by the Python reference; verify_protocol.mjs re-derives them in Node.",
-            "salted": _salted(), "bridge": _bridge(), "batches": batches,
+            "salted": _salted(), "batches": batches,
             "inclusion_negative": _inclusion_negative(batches), "statements": _statements(), "proofs": _proofs(),
             "reserved": _reserved()}
 

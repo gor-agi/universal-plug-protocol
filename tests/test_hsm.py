@@ -11,15 +11,14 @@ import pytest
 pkcs11 = pytest.importorskip("pkcs11")
 pytest.importorskip("cryptography")
 
-from plug import Attestation, Plug, suites
-from plug.adapters.oracle import OracleAdapter
-from plug.core import sha256_hex, statement_hash
+from upp import Attestation, LocalLedger, Plug, suites
+from upp.core import sha256_hex, statement_hash
 
-CANDIDATES = [os.environ.get("PLUG_PKCS11_LIB", ""), "/opt/homebrew/lib/softhsm/libsofthsm2.so",
+CANDIDATES = [os.environ.get("UPP_PKCS11_LIB", ""), "/opt/homebrew/lib/softhsm/libsofthsm2.so",
               "/usr/local/lib/softhsm/libsofthsm2.so", "/usr/lib/softhsm/libsofthsm2.so",
               "/usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so", "/usr/lib/aarch64-linux-gnu/softhsm/libsofthsm2.so"]
 LIB = next((p for p in CANDIDATES if p and os.path.exists(p)), None)
-TOKEN, PIN = "plug-test", "1234"
+TOKEN, PIN = "upp-test", "1234"
 pytestmark = pytest.mark.skipif(LIB is None or shutil.which("softhsm2-util") is None, reason="SoftHSM2 not installed")
 
 
@@ -60,14 +59,21 @@ def test_attestations_signed_inside_the_token_verify(token, alg, label):
     try:
         assert suites.parse_did_key(signer.verification_method)[0] == alg
         p = Plug(trust={"evidence": {"issuers": [signer.verification_method]}})
-        p.register_adapter("evidence", OracleAdapter())
-        att = Attestation(sha256_hex(f"hsm {alg}"), "agent.action", signer.verification_method,
-                          time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), meta={"model_family": "family-a"})
-        suites.sign_attestation(signer, att)
-        p.attest("evidence", att)
+        p.register("evidence", LocalLedger())
+        p.open("evidence", {"signer": signer})
+        assert p.active().subject == signer.verification_method
+        r = p.prove(f"hsm {alg}", "agent.action", "evidence", meta={"model_family": "family-a"})
+        att = Attestation.from_receipt(r)
+        assert att.proof["verification_method"] == signer.verification_method
         assert p.check(att, network="evidence")["valid"] is True
         att.fact_type = "control.resume"
         assert p.check(att, network="evidence")["valid"] is False
+        signed = Attestation(sha256_hex(f"hsm {alg} signed"), "agent.action", signer.verification_method,
+                             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        suites.sign_attestation(signer, signed)
+        assert suites.verify(statement_hash(signed), signed.proof)[0] is True
+        p.attest(signed, "evidence")
+        assert p.check(signed, network="evidence")["valid"] is True
     finally:
         signer.close()
 

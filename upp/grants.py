@@ -14,11 +14,10 @@ Scope is {key: [allowed values]}. An action is within it when, for every key, th
 """
 from __future__ import annotations
 import re
-import time
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
-from .core import Attestation, PlugError, Receipt, SPEC_VERSION, Status, canonical, digest, parse_time, statement_hash
+from .core import Attestation, PlugError, Receipt, Status, canonical, digest, now_iso, parse_time, statement_hash
 
 GRANT, REVOKE = "grant", "grant.revoke"
 KINDS = ("consent", "mandate", "approval")
@@ -47,14 +46,10 @@ def _party(did: str) -> str:
     return issuer_key(base) or base
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
 def make_grant(grantor: str, grantee: str, scope: dict, expires_at: str, kind: Optional[str] = None,
                parent: Optional[Attestation] = None, issued_at: Optional[str] = None, hash_alg: str = "sha-256",
                **meta: Any) -> Attestation:
-    """An unsigned grant attestation; sign it (`suites.sign_attestation`) or attest it from the grantor's session."""
+    """An unsigned grant attestation; sign it (`upp.suites.sign_attestation`) or attest it from the grantor's session."""
     _check_scope(scope)
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind is one of {', '.join(KINDS)}")
@@ -64,7 +59,7 @@ def make_grant(grantor: str, grantee: str, scope: dict, expires_at: str, kind: O
     if parent is not None:
         body["refs"] = dict(body.get("refs") or {}, parent=statement_hash(parent))
     subject = digest(canonical({"grant": {"grantor": grantor, "grantee": grantee, "scope": scope}}).encode(), hash_alg)
-    return Attestation(subject, GRANT, grantor, issued_at or _now(), expires_at=expires_at, meta=body,
+    return Attestation(subject, GRANT, grantor, issued_at or now_iso(), expires_at=expires_at, meta=body,
                        hash_alg=hash_alg)
 
 
@@ -72,7 +67,7 @@ def make_revocation(revoker: str, grant: Attestation, issued_at: Optional[str] =
     """An unsigned revocation of `grant`, by its grantor or any ancestor's grantor. Final: never retracted."""
     target = statement_hash(grant)
     return Attestation(digest(canonical({"revoke": target}).encode(), grant.hash_alg), REVOKE, revoker,
-                       issued_at or _now(), meta={"refs": {"revokes": target}}, hash_alg=grant.hash_alg)
+                       issued_at or now_iso(), meta={"refs": {"revokes": target}}, hash_alg=grant.hash_alg)
 
 
 def _check_scope(scope: Any) -> None:
@@ -111,7 +106,7 @@ def check_authority(plug, action: Attestation, grants: Iterable[Attestation],
     def fail(error: str) -> dict:
         return {"valid": False, "error": error, "principal": None, "chain": []}
 
-    net = plug._resolve_network(network)
+    net = plug._network(network)
 
     def where(att: Attestation) -> str:
         # One network for the whole chain: the verifier's. An anchor is not signed, so it never chooses the policy.
@@ -169,7 +164,7 @@ def check_authority(plug, action: Attestation, grants: Iterable[Attestation],
             return fail("proof_invalid: grant chain loops or is too long")
         chain.append(current)
         if parent_hash is None:
-            root = plug.verify(current, where(current))  # the root grantor must be trusted (closed by default)
+            root = plug._verify(current, where(current))  # the root grantor must be trusted (closed by default)
             if root.status != Status.OK:
                 return fail(f"root grant: {root.error}")
             receipts.append(root)

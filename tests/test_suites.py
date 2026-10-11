@@ -8,8 +8,8 @@ import tempfile
 
 import pytest
 
-from plug import suites
-from plug.core import PlugError, sha256_hex
+from upp import suites
+from upp.core import PlugError, sha256_hex
 
 pytest.importorskip("cryptography")
 
@@ -32,7 +32,7 @@ def test_sign_verify_and_tamper(alg):
     proof = suites.sign(alg, key, SUBJECT)
     ok, method = suites.verify(SUBJECT, proof)
     assert ok and method == proof["verification_method"]
-    assert suites.binds(f"did:plug:net:{method}" if method.startswith("0x") else method, method)
+    assert suites.binds(f"did:pkh:eip155:1:{method}" if method.startswith("0x") else method, method)
     assert suites.verify(sha256_hex(b"other"), proof)[0] is False
     flipped = bytearray(bytes.fromhex(proof["sig"][2:]))
     flipped[5] ^= 1
@@ -91,30 +91,99 @@ def test_sm2_keys_with_leading_0_or_4_survive():
 
 def test_issuer_binding():
     assert suites.binds("did:pkh:eip155:1:0xAbC", "0xabc")
-    assert suites.binds("did:plug:sepolia:0xABC", "0xAbc")
-    assert suites.binds("did:plug:eip155:11155111:0xABC", "0xabc")
-    assert not suites.binds("did:plug:sepolia:0xabc", "0xdef")
+    assert suites.binds("did:pkh:eip155:11155111:0xABC", "0xAbc")
+    assert not suites.binds("did:pkh:eip155:1:0xabc", "0xdef")
     assert not suites.binds("did:web:example.org", "did:key:z6Mk...")
     assert not suites.binds("did:eudi:eudi:alice", "0xabc")
+    for gone in ("did:plug:sepolia:0xABC", "did:plug:eip155:11155111:0xABC"):
+        assert not suites.binds(gone, "0xabc"), "did:plug is not an issuer DID"
+        assert suites.issuer_key(gone) is None
+
+
+def test_issuer_key_names_the_key_or_account():
+    did = suites.KeySigner("ed25519", suites.generate_key("ed25519")).verification_method
+    assert suites.issuer_key(did + "#key-1") == did
+    assert suites.issuer_key("did:pkh:eip155:1:0xAbC") == "0xabc"
+    assert suites.issuer_key("did:pkh:cosmos:cosmoshub-3:cosmos1t2uf") == "cosmos1t2uf"
+    assert suites.issuer_key("did:web:example.org") is None
 
 
 def test_account_did_grammar():
     p = suites.parse_account_did
-    assert p("did:plug:eip155:11155111:0xAbC") == ("eip155:11155111", "0xAbC")
-    assert p("did:plug:cosmos:cosmoshub-3:cosmos1t2uf#k") == ("cosmos:cosmoshub-3", "cosmos1t2uf")
-    assert p("did:plug:chainmaker:ZXaa11") == ("chainmaker", "ZXaa11")
-    assert p("did:plug:testnet:alice") == ("testnet", "alice")
+    assert p("did:pkh:eip155:11155111:0xAbC") == ("eip155:11155111", "0xAbC")
+    assert p("did:pkh:cosmos:cosmoshub-3:cosmos1t2uf#k") == ("cosmos:cosmoshub-3", "cosmos1t2uf")
     assert p("did:pkh:eip155:1:0xabc") == ("eip155:1", "0xabc")
-    for bad in ("did:plug:anon", "did:pkh:sepolia:0xabc", "did:plug:EIP155:1:0xabc",
-                "did:plug:chainmaker:chain1:ZX", "did:plug:eip155:1:0x:abc",
-                "did:plug:ab:1:0xabc", "did:plug:x:" + "a" * 129):
+    for bad in ("did:plug:eip155:11155111:0xAbC", "did:plug:chainmaker:ZXaa11", "did:plug:testnet:alice",
+                "did:pkh:sepolia:0xabc", "did:pkh:EIP155:1:0xabc", "did:pkh:eip155:1:0x:abc",
+                "did:pkh:ab:1:0xabc", "did:pkh:eip155:1:" + "a" * 129, "did:key:z6Mk", ""):
         assert p(bad) is None, bad
+
+
+def _b64u(data):
+    import base64
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+
+@pytest.mark.parametrize("jose_alg,suite", [("ES256", "ecdsa-p256"), ("Ed25519", "ed25519"), ("EdDSA", "ed25519")])
+def test_verify_jws(jose_alg, suite):
+    if not available(suite):
+        pytest.skip(f"{suite} library not installed")
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    signing_input = _b64u(b'{"alg":"' + jose_alg.encode() + b'"}') + b"." + _b64u(b'{"sub":"alice"}')
+    key = suites.generate_key(suite)
+    method = suites.KeySigner(suite, key).verification_method
+    if suite == "ed25519":
+        signature = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key)).sign(signing_input)
+    else:
+        from cryptography.hazmat.primitives import hashes
+        der = ec.derive_private_key(int(key, 16), ec.SECP256R1()).sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der)
+        signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    assert suites.verify_jws(signing_input, signature, jose_alg, method) is True
+    assert suites.verify_jws(signing_input + b"x", signature, jose_alg, method) is False
+    assert suites.verify_jws(signing_input, signature, "RS256", method) is False
+    assert suites.verify_jws(signing_input, signature, "none", method) is False
+    other = "ES256" if suite == "ed25519" else "EdDSA"
+    assert suites.verify_jws(signing_input, signature, other, method) is False, "alg must match the key type"
+    stranger = suites.KeySigner(suite, suites.generate_key(suite)).verification_method
+    assert suites.verify_jws(signing_input, signature, jose_alg, stranger) is False
+    assert suites.verify_jws(signing_input, signature, jose_alg, "did:web:example.org") is False
+
+
+@pytest.mark.parametrize("alg", suites.SUITES)
+def test_key_signer_signs_the_32_byte_message(alg):
+    if not available(alg):
+        pytest.skip(f"{alg} library not installed")
+    key = suites.generate_key(alg)
+    signer = suites.KeySigner(alg, key)
+    proof = signer.sign(bytes.fromhex(SUBJECT))
+    assert proof["verification_method"] == signer.verification_method and proof["alg"] == alg
+    assert suites.verify(SUBJECT, proof) == (True, signer.verification_method)
+    if alg == "ecdsa-secp256k1":
+        assert signer.verification_method.startswith("0x")
+    else:
+        assert suites.parse_did_key(signer.verification_method)[0] == alg
+    with pytest.raises(PlugError):
+        signer.sign(b"short")
+
+
+def test_unknown_suites_and_malformed_proofs_never_verify():
+    with pytest.raises(PlugError) as e:
+        suites.generate_key("rsa")
+    assert e.value.code == "unsupported_op"
+    with pytest.raises(PlugError):
+        suites.sign("rsa", "00" * 32, SUBJECT)
+    for proof in (None, {}, {"alg": "ed25519", "sig": "0x00"}, {"alg": "rsa", "sig": "0x00", "verification_method": "x"},
+                  {"alg": "ed25519", "sig": "zz", "verification_method": "did:key:z6Mk"}):
+        assert suites.verify(SUBJECT, proof)[0] is False, proof
+    assert suites.verify("abc", {"alg": "ed25519", "sig": "0x00", "verification_method": "did:key:z6Mk"})[0] is False
 
 
 # ---- OpenSSL interoperability ----
 
 def _openssl():
-    for cand in (os.environ.get("PLUG_OPENSSL"), "/opt/homebrew/opt/openssl@3/bin/openssl",
+    for cand in (os.environ.get("UPP_OPENSSL"), "/opt/homebrew/opt/openssl@3/bin/openssl",
                  "/usr/local/opt/openssl@3/bin/openssl", shutil.which("openssl")):
         if cand and os.path.exists(cand):
             out = subprocess.run([cand, "version"], capture_output=True, text=True).stdout
@@ -178,7 +247,7 @@ def test_interop_with_openssl(alg):
         with open(msg, "wb") as f:
             f.write(bytes.fromhex(SUBJECT))
 
-        # OpenSSL signs, Plug verifies.
+        # OpenSSL signs, upp verifies.
         _run("pkeyutl", "-sign", "-inkey", pem, "-rawin", *DIGEST[alg], "-in", msg, "-out", sig)
         raw = open(sig, "rb").read()
         raw = raw if alg == "ed25519" else _der_to_raw(raw)
@@ -186,7 +255,7 @@ def test_interop_with_openssl(alg):
         ok, why = suites.verify(SUBJECT, {"alg": alg, "sig": "0x" + raw.hex(), "verification_method": method})
         assert ok, why
 
-        # Plug signs with the same key, OpenSSL verifies.
+        # upp signs with the same key, OpenSSL verifies.
         proof = suites.sign(alg, priv.hex(), SUBJECT)
         assert proof["verification_method"] == method
         raw = bytes.fromhex(proof["sig"][2:])

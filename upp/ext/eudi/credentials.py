@@ -14,8 +14,8 @@ import json
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from .core import PlugError
-from . import suites
+from ...core import PlugError
+from ... import suites
 
 SD_JWT_VC_TYPES = ("dc+sd-jwt", "vc+sd-jwt")
 _SKEW = 300
@@ -109,11 +109,13 @@ def _numeric(claims: dict, name: str):
 
 
 def verify_sd_jwt_vc(sd_jwt: str, anchors: Iterable, *, at: Optional[datetime] = None,
-                     audience: Optional[str] = None, nonce: Optional[str] = None, max_key_binding_age: int = 300) -> dict:
+                     audience: Optional[str] = None, nonce: Optional[str] = None, max_key_binding_age: int = 300,
+                     status_lists=None) -> dict:
     """Verify an SD-JWT VC presentation `<issuer JWT>~<disclosure>~...~[<KB-JWT>]` and return
     {"issuer": did:key, "certificate", "vct", "claims", "status", "holder"}.
 
-    Key binding is required when `audience` or `nonce` is given, and checked whenever present."""
+    Key binding is required when `audience` or `nonce` is given, and checked whenever present. A credential with a
+    status claim is accepted only when `status_lists` (a StatusLists) shows it VALID: closed by default."""
     at = at or datetime.now(timezone.utc)
     now = at.timestamp()
     if not isinstance(sd_jwt, str) or "~" not in sd_jwt:
@@ -224,6 +226,10 @@ def verify_sd_jwt_vc(sd_jwt: str, anchors: Iterable, *, at: Optional[datetime] =
         kb_iat = _numeric(kb, "iat")
         if kb_iat is None or not now - max_key_binding_age <= kb_iat <= now + _SKEW:
             raise PlugError("proof_invalid", "key binding is not fresh")
+    if payload.get("status") is not None:
+        if status_lists is None:
+            raise PlugError("not_authorized", "credential has a status; pass status_lists to check it")
+        status_lists.check(payload["status"], [issuer])
     return {"issuer": issuer, "certificate": leaf, "vct": payload["vct"], "claims": claims,
             "status": payload.get("status"), "holder": holder}
 

@@ -26,11 +26,9 @@ from .core import PlugError, digest  # noqa: F401  (digest re-exported)
 
 SUITES = ("ecdsa-secp256k1", "ed25519", "ecdsa-p256", "sm2-sm3")
 
-# did:plug and did:pkh account identifiers; network is CAIP-2, account is CAIP-10 (spec/did-plug.md).
+# did:pkh account identifiers: network is a CAIP-2 chain ID, account a CAIP-10 account address.
 _ACCOUNT_DID = re.compile(
-    r"^did:(?P<method>plug|pkh):"
-    r"(?:(?P<ns>[-a-z0-9]{3,8}):(?P<ref>[-_a-zA-Z0-9]{1,32})|(?P<alias>[-a-z0-9]{1,32})):"
-    r"(?P<account>[-.%a-zA-Z0-9]{1,128})$")
+    r"^did:pkh:(?P<ns>[-a-z0-9]{3,8}):(?P<ref>[-_a-zA-Z0-9]{1,32}):(?P<account>[-.%a-zA-Z0-9]{1,128})$")
 
 # multicodec public-key codes (github.com/multiformats/multicodec, table.csv)
 _MULTICODEC = {"ed25519": 0xED, "ecdsa-p256": 0x1200, "sm2-sm3": 0x1206}
@@ -443,11 +441,9 @@ def sign_attestation(signer, att) -> dict:
 
 
 def parse_account_did(did: str) -> Optional[tuple[str, str]]:
-    """(network, account) for did:plug or did:pkh. network is a CAIP-2 chain ID, or a deployment-local alias."""
+    """(CAIP-2 network, account) for a did:pkh, else None."""
     m = _ACCOUNT_DID.match((did or "").split("#", 1)[0])
-    if not m or (m["method"] == "pkh" and m["alias"]):
-        return None
-    return (m["alias"] or f"{m['ns']}:{m['ref']}"), m["account"]
+    return (f"{m['ns']}:{m['ref']}", m["account"]) if m else None
 
 
 def issuer_key(did: str) -> Optional[str]:

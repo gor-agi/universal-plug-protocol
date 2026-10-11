@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the Universal Plug Protocol project
-"""Conformance vectors: any Plug implementation, in any language, must reproduce these."""
+"""Conformance vectors: any UPP implementation, in any language, must reproduce these."""
 import json
 import os
 import shutil
@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 
-from plug.core import canonical
+from upp.core import canonical
 
 VECTORS = os.path.join(os.path.dirname(__file__), "..", "spec", "vectors")
 
@@ -29,7 +29,7 @@ def test_jcs_numbers_match_ecmascript():
 
 
 def test_jcs_objects_and_digests():
-    from plug.suites import digest
+    from upp.core import digest
     for v in load("jcs.json")["objects"]:
         c = canonical(json.loads(v["input"]))
         assert c == v["canonical"], v["input"]
@@ -38,11 +38,11 @@ def test_jcs_objects_and_digests():
 
 
 def test_prove_subject_hash_matches_vectors_under_each_profile():
-    from plug.adapters.stub import StubAdapter
-    from plug.core import Plug
+    from upp import LocalLedger, Plug
     for alg in ("sha-256", "sha3-256", "sm3"):
         p = Plug(hash_alg=alg)
-        p.register_adapter("t", StubAdapter())
+        p.register("t", LocalLedger())
+        p.open("t")
         for v in load("jcs.json")["objects"]:
             fact = json.loads(v["input"])
             if isinstance(fact, (dict, list)):

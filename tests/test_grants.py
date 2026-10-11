@@ -7,10 +7,9 @@ import pytest
 
 pytest.importorskip("cryptography")
 
-from plug import Attestation, Plug, suites
-from plug.adapters.oracle import OracleAdapter
-from plug.core import sha256_hex, statement_hash
-from plug.grants import check_authority, check_sequence, make_grant, make_revocation
+from upp import ANY, Attestation, LocalLedger, Plug, suites
+from upp.core import PlugError, sha256_hex, statement_hash
+from upp.grants import check_authority, check_sequence, make_grant, make_revocation, narrows, within
 
 NET = "evidence"
 
@@ -24,9 +23,15 @@ class Party:
         self.signer = suites.KeySigner("ed25519", suites.generate_key("ed25519"))
         self.did = self.signer.verification_method
 
-    def put(self, p, att):
-        suites.sign_attestation(self.signer, att)
-        p.attest(NET, att)
+        self.sessions = {}
+
+    def put(self, p, att, network=NET):
+        """Sign and anchor `att` from this party's own session (the ledger signs as the session's did:key)."""
+        key = (id(p), network)
+        if key not in self.sessions:
+            self.sessions[key] = p.open(network, {"signer": self.signer})
+        p.use(self.sessions[key])
+        p.attest(att, network)
         return att
 
     def act(self, p, fact, fact_type="agent.action", grant=None, **meta):
@@ -39,7 +44,7 @@ class Party:
 def world():
     principal, agent, sub, stranger = Party(), Party(), Party(), Party()
     p = Plug(trust={NET: {"issuers": [principal.did]}})  # only the principal is trusted; agents are not
-    p.register_adapter(NET, OracleAdapter(max_jump=10.0))
+    p.register(NET, LocalLedger())
     return p, principal, agent, sub, stranger
 
 
@@ -106,13 +111,16 @@ def test_revocation_by_grantor_or_ancestor_only(world):
     p, principal, agent, sub, stranger = world
     parent = principal.put(p, make_grant(principal.did, agent.did, {"fact_type": ["agent.action"]}, iso(3600)))
     child = agent.put(p, make_grant(agent.did, sub.did, {"fact_type": ["agent.action"]}, iso(1800), parent=parent))
-    action = sub.act(p, "work", grant=child)
     ignored = stranger.put(p, make_revocation(stranger.did, child))
-    assert check_authority(p, action, [child, parent], [ignored], network=NET)["valid"] is True
-    for revoker in (agent, principal):  # the grantor, or an ancestor's grantor
-        revocation = revoker.put(p, make_revocation(revoker.did, child))
-        v = check_authority(p, action, [child, parent], [revocation], network=NET)
+    earlier = sub.act(p, "work", grant=child)
+    assert check_authority(p, earlier, [child, parent], [ignored], network=NET)["valid"] is True
+    for n, revoker in enumerate((agent, principal)):  # the grantor, or an ancestor's grantor
+        revocation = revoker.put(p, make_revocation(revoker.did, child, issued_at=iso(n)))
+        later = sub.act(p, f"work after revocation {n}", grant=child)
+        v = check_authority(p, later, [child, parent], [revocation], network=NET)
         assert v["valid"] is False and v["error"] == "not_authorized: grant revoked"
+        assert check_authority(p, earlier, [child, parent], [revocation], network=NET)["valid"] is True, \
+            "a revocation anchored after an action does not undo it"
 
 
 def test_consent_by_purpose_and_channel_and_single_action_approval(world):
@@ -148,48 +156,65 @@ def test_action_sequences_reveal_skipped_and_forked_records(world):
     assert "action 1: another actor" in check_sequence([first, stranger.act(p, "x", refs={"prev": statement_hash(first)})])
 
 
-def test_withdrawal_does_not_undo_earlier_actions_on_a_ledger():
-    """GDPR Art. 7(3): withdrawing consent does not affect processing before it. Order is the anchored time."""
-    pytest.importorskip("web3")
-    from eth_account import Account
-    from plug.adapters.live import LiveAdapter
-    from test_live_adapter import _FakeW3
-    subject_key, processor_key = Account.create().key.hex(), Account.create().key.hex()
-    p = Plug()
-    p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
-    subject_session = p.open("sepolia", {"scheme": "raw", "material": subject_key})
-    subject = p.active().credential_subject
-    processor_session = p.open("sepolia", {"scheme": "raw", "material": processor_key})
-    processor = p.active().credential_subject
-    p.trust("sepolia", {"issuers": [subject]})
+def test_withdrawal_does_not_undo_earlier_actions_on_a_ledger(world):
+    """GDPR Art. 7(3): withdrawing consent does not affect processing before it. Order is the anchored time,
+    never a time the parties claim."""
+    p, subject, processor, _, _ = world
+    consent = subject.put(p, make_grant(subject.did, processor.did, {"purpose": ["newsletter"]}, iso(86400),
+                                        kind="consent"))
 
-    def anchored(session, att):
-        p.use(session)
-        return Attestation.from_receipt(p.attest("sepolia", att))
-
-    consent = anchored(subject_session, make_grant(subject, processor, {"purpose": ["newsletter"]}, iso(86400),
-                                                   kind="consent"))
-
-    def send(n):
-        return anchored(processor_session, Attestation(sha256_hex(f"newsletter {n}"), "message.sent", processor, iso(),
-                                                       meta={"purpose": "newsletter",
-                                                             "refs": {"grant": statement_hash(consent)}}))
-    before = send(1)
-    withdrawal = anchored(subject_session, make_revocation(subject, consent))
-    after = send(2)
-    assert check_authority(p, before, [consent], [withdrawal], network="sepolia")["valid"] is True
-    v = check_authority(p, after, [consent], [withdrawal], network="sepolia")
+    def send(n, claimed):
+        return processor.put(p, Attestation(sha256_hex(f"newsletter {n}"), "message.sent", processor.did, claimed,
+                                            meta={"purpose": "newsletter", "refs": {"grant": statement_hash(consent)}}))
+    before = send(1, iso(3600))  # a claimed issued_at after the withdrawal changes nothing
+    withdrawal = subject.put(p, make_revocation(subject.did, consent))
+    after = send(2, iso(-3600))  # nor does one claimed before it
+    assert check_authority(p, before, [consent], [withdrawal], network=NET)["valid"] is True
+    v = check_authority(p, after, [consent], [withdrawal], network=NET)
     assert v["valid"] is False and v["error"] == "not_authorized: grant revoked"
+    unanchored = make_revocation(subject.did, consent, issued_at=iso(-7200))
+    suites.sign_attestation(subject.signer, unanchored)
+    assert check_authority(p, after, [consent], [unanchored], network=NET)["valid"] is True, \
+        "a revocation counts only once a ledger has anchored it"
+
+
+def test_a_grant_is_judged_at_the_anchored_time_of_the_action(world):
+    p, principal, agent, _, _ = world
+    deadline = time.time() // 1 + 1
+    grant = principal.put(p, make_grant(principal.did, agent.did, {"fact_type": ["agent.action"]},
+                                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(deadline))))
+    time.sleep(max(0.0, deadline - time.time()) + 0.01)
+    late = agent.put(p, Attestation(sha256_hex("after expiry"), "agent.action", agent.did, iso(-60),
+                                    meta={"refs": {"grant": statement_hash(grant)}}))
+    v = check_authority(p, late, [grant], network=NET)
+    assert v["valid"] is False and "expired before the action" in v["error"], "the claimed issued_at is not proof"
+
+
+def test_scope_helpers_and_malformed_grants():
+    assert narrows({"fact_type": ["a"], "purpose": ["x"]}, {"fact_type": ["a", "b"]})
+    assert not narrows({"purpose": ["x"]}, {"fact_type": ["a"]}), "dropping a key widens the scope"
+    assert not narrows({"fact_type": ["a", "c"]}, {"fact_type": ["a", "b"]})
+    action = Attestation(sha256_hex("x"), "agent.action", "did:key:z", iso(), meta={"purpose": "billing"})
+    assert within({"fact_type": ["agent.action"], "network": [NET], "purpose": ["billing"]}, action, NET) is None
+    assert within({"network": [NET]}, action, "other") == "network"
+    assert within({"channel": ["sms"]}, action, NET) == "channel", "a missing value is out of scope"
+    for scope in ({}, {"fact_type": []}, {"fact_type": "agent.action"}, {"fact_type": [1]}, []):
+        with pytest.raises(PlugError):
+            make_grant("did:key:a", "did:key:b", scope, iso(60))
+    with pytest.raises(ValueError):
+        make_grant("did:key:a", "did:key:b", {"fact_type": ["x"]}, "")
+    with pytest.raises(ValueError):
+        make_grant("did:key:a", "did:key:b", {"fact_type": ["x"]}, iso(60), kind="power-of-attorney")
 
 
 def test_a_chain_is_judged_on_the_verifiers_network_only(world):
-    from plug import ANY
     p, principal, agent, _, _ = world
     p.trust("scratch", ANY)  # a second, open network must not lend its trust to the strict one
-    p.register_adapter("scratch", OracleAdapter(max_jump=10.0))
-    self_granted = make_grant(agent.did, agent.did, {"fact_type": ["agent.action"]}, iso(3600))
-    suites.sign_attestation(agent.signer, self_granted)
-    self_granted = Attestation.from_receipt(p.attest("scratch", self_granted))
+    p.register("scratch", LocalLedger())
+    self_granted = agent.put(p, make_grant(agent.did, agent.did, {"fact_type": ["agent.action"]}, iso(3600)),
+                             network="scratch")
+    assert self_granted.anchor.network == "scratch"
+    assert p.check(self_granted, network="scratch")["valid"] is True
     action = agent.act(p, "self-authorized", grant=self_granted)
     v = check_authority(p, action, [self_granted], network=NET)
     assert v["valid"] is False and "spans networks" in v["error"]
@@ -200,13 +225,21 @@ def test_a_chain_is_judged_on_the_verifiers_network_only(world):
 def test_every_spelling_of_the_grantors_key_can_revoke(world):
     p, principal, agent, _, _ = world
     grant = principal.put(p, make_grant(principal.did, agent.did, {"fact_type": ["agent.action"]}, iso(3600)))
-    action = agent.act(p, "work", grant=grant)
     fragment = make_revocation(principal.did + "#" + principal.did.split(":")[-1], grant)
-    upper = make_revocation(principal.did, grant)
+    upper = make_revocation(principal.did, grant, issued_at=iso(1))
     upper.meta["refs"]["revokes"] = statement_hash(grant).upper()
-    for revocation in (fragment, upper):
+    for n, revocation in enumerate((fragment, upper)):
         principal.put(p, revocation)
+        action = agent.act(p, f"work {n}", grant=grant)
         v = check_authority(p, action, [grant], [revocation], network=NET)
         assert v["valid"] is False and v["error"] == "not_authorized: grant revoked"
     malformed = agent.act(p, "bad ref", refs={"grant": "not-a-hash"})
     assert check_authority(p, malformed, [grant], network=NET)["valid"] is False
+
+
+def test_parties_are_compared_by_key_not_spelling(world):
+    p, principal, agent, _, _ = world
+    grant = principal.put(p, make_grant(principal.did, agent.did + "#key-1", {"fact_type": ["agent.action"]},
+                                        iso(3600)))
+    v = check_authority(p, agent.act(p, "fragment grantee", grant=grant), [grant], network=NET)
+    assert v["valid"] is True, v["error"]

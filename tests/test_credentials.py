@@ -5,7 +5,10 @@
 import base64
 import datetime as dt
 import json
+import threading
 import time
+import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -16,8 +19,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from plug import PlugError
-from plug.credentials import certificate_did, validate_chain, verify_mdoc, verify_sd_jwt_vc
+from upp import PlugError
+from upp.ext.eudi.credentials import certificate_did, validate_chain, verify_mdoc, verify_sd_jwt_vc
 
 NOW = dt.datetime.now(dt.timezone.utc)
 
@@ -79,7 +82,7 @@ def _jwk(private_key):
     return jwk.JWK(**fields)
 
 
-def _issue(pki, typ="dc+sd-jwt", exp_delta=3600, x5c=None):
+def _issue(pki, typ="dc+sd-jwt", exp_delta=3600, x5c=None, extra=None):
     pytest.importorskip("sd_jwt")
     from sd_jwt.common import SDObj
     from sd_jwt.issuer import SDJWTIssuer
@@ -87,7 +90,7 @@ def _issue(pki, typ="dc+sd-jwt", exp_delta=3600, x5c=None):
     claims = {"iss": "https://pid.example.lu", "vct": "urn:eudi:pid:1", "iat": int(time.time()),
               "exp": int(time.time()) + exp_delta, SDObj("given_name"): "Marie", SDObj("family_name"): "Curie",
               "address": {SDObj("country"): "LU", SDObj("locality"): "Luxembourg"},
-              "nationalities": [SDObj("PL"), "FR"]}
+              "nationalities": [SDObj("PL"), "FR"], **(extra or {})}
     der = pki["issuer"].public_bytes(serialization.Encoding.DER)
     issuer = SDJWTIssuer(claims, _jwk(pki["issuer_key"]), holder_key=_jwk(holder), sign_alg="ES256",
                          extra_header_parameters={"typ": typ, "x5c": x5c or [base64.b64encode(der).decode()]})
@@ -154,6 +157,113 @@ def test_sd_jwt_vc_issuer_must_sign_with_its_certified_key(pki):
     token, _ = _issue(pki, x5c=[base64.b64encode(other_cert.public_bytes(serialization.Encoding.DER)).decode()])
     with pytest.raises(PlugError, match="issuer signature does not verify"):
         verify_sd_jwt_vc(token, [pki["root"], other_ca])
+
+
+# ---- SD-JWT VC with a status claim: closed unless a status list shows it VALID ----
+
+class _StatusServer:
+    def __init__(self):
+        self.docs, self.hits = {}, {}
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.hits[self.path] = outer.hits.get(self.path, 0) + 1
+                body = outer.docs.get(self.path)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/statuslist+jwt")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.httpd.server_port}{path}"
+
+
+@pytest.fixture
+def status_server():
+    s = _StatusServer()
+    yield s
+    s.httpd.shutdown()
+
+
+def _b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _status_token(private_key, uri, statuses):
+    """A Status List Token (bits 1) signed ES256 by `private_key`."""
+    from upp import suites
+    array = bytearray((len(statuses) + 7) // 8)
+    for i, value in enumerate(statuses):
+        array[i // 8] |= value << (i % 8)
+    head = {"alg": "ES256", "typ": "statuslist+jwt"}
+    body = {"sub": uri, "iat": int(time.time()), "ttl": 600,
+            "status_list": {"bits": 1, "lst": _b64u(zlib.compress(bytes(array), 9))}}
+    signing_input = f"{_b64u(json.dumps(head).encode())}.{_b64u(json.dumps(body).encode())}"
+    sig, _ = suites._p256_sign(f"{private_key.private_numbers().private_value:064x}", signing_input.encode())
+    return f"{signing_input}.{_b64u(sig)}".encode()
+
+
+def test_sd_jwt_vc_with_a_status_is_closed_without_status_lists(pki, status_server):
+    uri = status_server.url("/sl/pid")
+    status_server.docs["/sl/pid"] = _status_token(pki["issuer_key"], uri, [0, 1])
+    token, _ = _issue(pki, extra={"status": {"status_list": {"idx": 0, "uri": uri}}})
+    with pytest.raises(PlugError, match="pass status_lists") as e:
+        verify_sd_jwt_vc(token, [pki["root"]])
+    assert e.value.code == "not_authorized"
+
+
+def test_sd_jwt_vc_status_is_checked_against_the_issuers_status_list(pki, status_server):
+    from upp.ext.eudi.status_lists import StatusLists
+    uri = status_server.url("/sl/pid")
+    status_server.docs["/sl/pid"] = _status_token(pki["issuer_key"], uri, [0, 1])
+    lists = StatusLists()
+    valid, _ = _issue(pki, extra={"status": {"status_list": {"idx": 0, "uri": uri}}})
+    out = verify_sd_jwt_vc(valid, [pki["root"]], status_lists=lists)
+    assert out["status"] == {"status_list": {"idx": 0, "uri": uri}}
+    assert out["issuer"] == certificate_did(pki["issuer"])
+    revoked, _ = _issue(pki, extra={"status": {"status_list": {"idx": 1, "uri": uri}}})
+    with pytest.raises(PlugError, match="revoked via status list") as e:
+        verify_sd_jwt_vc(revoked, [pki["root"]], status_lists=lists)
+    assert e.value.code == "proof_invalid"
+
+
+def test_sd_jwt_vc_status_list_must_be_signed_by_the_credential_issuer(pki, status_server):
+    from upp.ext.eudi.status_lists import StatusLists
+    uri = status_server.url("/sl/forged")
+    status_server.docs["/sl/forged"] = _status_token(ec.generate_private_key(ec.SECP256R1()), uri, [0])
+    token, _ = _issue(pki, extra={"status": {"status_list": {"idx": 0, "uri": uri}}})
+    with pytest.raises(PlugError, match="not signed by a key of the issuer"):
+        verify_sd_jwt_vc(token, [pki["root"]], status_lists=StatusLists())
+
+
+def test_status_list_is_fetched_only_after_the_credential_signature_verifies(pki, status_server):
+    from upp.ext.eudi.status_lists import StatusLists
+    other_ca_key, other_ca = _ca("Unrelated CA")
+    _, other_cert = _issuer(other_ca_key, other_ca, cn="Other")
+    uri = status_server.url("/sl/order")
+    status_server.docs["/sl/order"] = _status_token(pki["issuer_key"], uri, [0])
+    forged, _ = _issue(pki, x5c=[base64.b64encode(other_cert.public_bytes(serialization.Encoding.DER)).decode()],
+                       extra={"status": {"status_list": {"idx": 0, "uri": uri}}})
+    with pytest.raises(PlugError, match="issuer signature does not verify"):
+        verify_sd_jwt_vc(forged, [pki["root"], other_ca], status_lists=StatusLists())
+    assert status_server.hits.get("/sl/order", 0) == 0
+
+
+def test_sd_jwt_vc_without_a_status_needs_no_status_lists(pki):
+    token, _ = _issue(pki)
+    assert verify_sd_jwt_vc(token, [pki["root"]])["status"] is None
 
 
 # ---- ISO mdoc, issued by pyMDOC-CBOR ----

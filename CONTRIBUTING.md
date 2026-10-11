@@ -1,12 +1,12 @@
 # Contributing
 
-Thank you for helping build a neutral interface for evidence and identity across networks.
+Thank you for helping make AI agents' actions checkable.
 
 ## Ground rules
 
 1. **The specification governs.** [SPEC.md](SPEC.md) is normative. When code and specification disagree, the code is wrong. Behavioral changes include a specification change in the same pull request.
-2. **Neutrality.** Core (`plug/core.py`, `plug/suites.py`) names no network, vendor, jurisdiction, or product. Network-specific logic belongs in adapters; jurisdiction-specific rules belong in deployment profiles and configuration.
-3. **Operation budget.** The protocol has thirteen operations. A proposal that adds one must remove or demote another, and states which.
+2. **Neutrality.** Core (`upp/core.py`, `upp/suites.py`, `upp/registry.py`) names no network, vendor, jurisdiction, or product. Network-specific logic belongs in `upp/ledgers` or `upp/ext`.
+3. **Small on purpose.** Two verbs, prove and check. A proposal that adds surface says what it removes, or why the protocol is incomplete without it.
 4. **No emulation.** A feature that depends on a backend, library, or network ships only when it runs against the real thing. Unavailable dependencies raise `unsupported_op`; they are never simulated.
 5. **Conformance first.** A change to canonical serialization, hashing, signature suites, or receipt hashing regenerates the vectors in `spec/vectors/` with an independent implementation and keeps every vector passing.
 
@@ -24,7 +24,7 @@ The sign-off name and email match the commit author. Pull requests with unsigned
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev,live,suites]"
+pip install -e ".[dev,ethereum,mcp]"
 git config core.hooksPath .githooks
 pytest -rs
 ```

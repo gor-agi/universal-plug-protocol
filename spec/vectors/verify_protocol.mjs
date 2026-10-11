@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Contributors to the Universal Plug Protocol project
 // Independent check of spec/vectors/protocol.json, written from SPEC.md with Node's standard library only.
-// Re-derives salted, bridge, and batch commitments, RFC 9162 roots and inclusion proofs, attestation
+// Re-derives salted and batch commitments, RFC 9162 roots and inclusion proofs, attestation
 // statements, and the reserved commitment domain; verifies Ed25519 and P-256 proofs over statements and
 // issuer binding for did:key.
 // Usage: node spec/vectors/verify_protocol.mjs
@@ -132,11 +132,10 @@ const publicKey = (alg, raw) => {
 };
 
 // The statement a proof signs: the subject hash with every label a verifier acts on (SPEC.md, Statement).
-const statement = (a) => ({ "plug.statement": {
+const statement = (a) => ({ "upp.statement": {
   subject_hash: a.subject_hash.toLowerCase(), hash_alg: a.hash_alg, fact_type: a.fact_type, issuer: a.issuer,
-  issued_at: a.issued_at, expires_at: a.expires_at ?? null, role: a.role ?? null,
+  issued_at: a.issued_at, expires_at: a.expires_at ?? null,
   meta: Object.fromEntries(Object.entries(a.meta ?? {}).filter(([k]) => !k.startsWith("_"))),
-  disclosure: a.disclosure ?? [],
 } });
 const statementHash = (a) => H(a.hash_alg, Buffer.from(canon(statement(a)), "utf8"));
 
@@ -170,11 +169,6 @@ for (const v of vectors.salted) {
   expect(hex(H(v.hash_alg, unhex(v.salt), fb)) === v.subject_hash, `salted commitment ${v.hash_alg} ${JSON.stringify(v.fact)}`);
 }
 
-for (const v of vectors.bridge) {
-  const c = H(v.hash_alg, Buffer.from(canon({ "plug.bridge": v.source }), "utf8"));
-  expect(hex(c) === v.commitment, `bridge ${v.hash_alg} ${v.source.address}`);
-}
-
 for (const b of vectors.batches) {
   const label = `batch ${b.hash_alg} ${b.commitment} size ${b.size}`;
   const subjects = b.facts.map((f, i) =>
@@ -182,7 +176,7 @@ for (const b of vectors.batches) {
   expect(subjects.every((s, i) => hex(s) === b.subjects[i]), `${label}: subjects`);
   const root = mth(b.hash_alg, subjects);
   expect(hex(root) === b.root && b.size === subjects.length, `${label}: root`);
-  const bc = H(b.hash_alg, Buffer.from(canon({ "plug.batch": { root: b.root, size: b.size } }), "utf8"));
+  const bc = H(b.hash_alg, Buffer.from(canon({ "upp.batch": { root: b.root, size: b.size } }), "utf8"));
   expect(hex(bc) === b.batch_commitment, `${label}: batch commitment`);
   b.inclusion.forEach((inc, i) => expect(
     inc.index === i && verifyInclusion(b.hash_alg, leafHash(b.hash_alg, subjects[i]), inc.index, b.size, inc.path.map(unhex), root),
@@ -205,7 +199,7 @@ for (const v of vectors.proofs) {
 }
 
 for (const v of vectors.reserved) {
-  const refused = factBytes(v.fact).subarray(0, 7).equals(Buffer.from('{"plug.', "utf8"));
+  const refused = factBytes(v.fact).subarray(0, 6).equals(Buffer.from('{"upp.', "utf8"));
   expect(refused === v.refused, `reserved domain: ${JSON.stringify(v.fact)}`);
 }
 

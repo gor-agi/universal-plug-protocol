@@ -2,6 +2,32 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.6.0
+
+### Breaking: renamed and simplified
+
+The package is now **`universal-plug`** on PyPI, imported as **`upp`** (the old `plug` name belongs to someone else on
+PyPI). Everything not needed to prove, check, and authorize was removed rather than maintained.
+
+- **API.** `Plug.register(network, ledger)`; `plug.open(network, {"key": ...} | {"signer": ...} | {})`;
+  `plug.check(attestation)` checks attestations only. `Receipt(op, status, network, state_ref, data, error)` with status
+  `ok` or `rejected`; `StateRef(network, address)`. A Plug with one network uses it when none is named.
+- **Ledgers replace adapters.** `upp.ledgers.LocalLedger` (new: an append-only log in memory or a JSONL file, signing
+  with any suite or an HSM), `upp.ledgers.EthereumLedger` (issuers are `did:pkh`), and `upp.ext.chainmaker.ChainMakerLedger`
+  (issuers are the did:key of the member key).
+- **Domain.** Statements and batch commitments are keyed `upp.statement` and `upp.batch`; prove refuses facts
+  beginning `{"upp.`. Statements no longer carry `role` or `disclosure`. Vectors regenerated.
+- **Extensions.** EUDI moved to `upp.ext.eudi` (`trusted_lists`, `credentials`, and `status_lists.StatusLists`, the
+  status checker that was inside the EUDI adapter). `verify_sd_jwt_vc` rejects a credential with a status claim unless
+  `status_lists=` is given.
+- **Removed.** The bridge, settle, identify, query and subscribe/watch operations; the oracle, EUDI, stub and
+  in-memory adapters; the prediction-market profile; StateRef registries; `did:plug`; role tags; disclosure pairs;
+  the idempotency cache; receipt `seq` and `spec_version`; adapter logs.
+- `cryptography` is now the one runtime dependency, so the default ledger signs out of the box. Extras: `ethereum`,
+  `mcp`, `hsm`, `eudi`, `chainmaker`, `sm2`, `dev`. The MCP server installs as `upp-mcp`.
+- Examples: `examples/agent_evidence.py` (a mandate, actions, an auditor, revocation) and
+  `examples/consent_record.py` (opt-in proof with no personal data on the ledger).
+
 ## 0.5.0
 
 ### Added

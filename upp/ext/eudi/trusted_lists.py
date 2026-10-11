@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from .core import ANY, PlugError
+from ...core import ANY, PlugError
 
 NS = {"t": "http://uri.etsi.org/02231/v2#", "ds": "http://www.w3.org/2000/09/xmldsig#"}
 GRANTED = "http://uri.etsi.org/TrstSvc/TrustedList/Svcstatus/granted"
