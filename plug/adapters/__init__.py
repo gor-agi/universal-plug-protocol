@@ -5,5 +5,6 @@ from .stub import StubAdapter
 from .live import LiveAdapter
 from .oracle import OracleAdapter
 from .eudi import EudiAdapter
+from .chainmaker import ChainMakerAdapter
 
-__all__ = ["StubAdapter", "LiveAdapter", "OracleAdapter", "EudiAdapter"]
+__all__ = ["StubAdapter", "LiveAdapter", "OracleAdapter", "EudiAdapter", "ChainMakerAdapter"]

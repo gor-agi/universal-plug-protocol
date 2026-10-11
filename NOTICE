@@ -10,3 +10,4 @@ product:
   - gmssl (BSD) for SM2 curve arithmetic
   - pycryptodome (BSD, Public Domain) for Ed25519 and P-256
   - web3, eth-account, eth-keys (MIT) for the Ethereum adapter
+  - chainmaker (Apache-2.0) for the ChainMaker adapter

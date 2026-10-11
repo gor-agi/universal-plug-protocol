@@ -23,3 +23,6 @@ suites = ["pycryptodome>=3.20", "gmssl>=3.2.2"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["plug"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

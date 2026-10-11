@@ -9,6 +9,7 @@ A network-agnostic Python core for attestations and identity. Callers use prove,
 - `plug.adapters.StubAdapter` — in-memory adapter. The test suite uses it. It does not check signatures, and it rejects proofs it cannot check.
 - `plug.adapters.OracleAdapter` — observation-to-attest backend with freshness, jump-bound, and issuer checks.
 - `plug.adapters.EudiAdapter` — EU digital identity wallet profile: trusted lists, token status lists, ES256 verification.
+- `plug.adapters.ChainMakerAdapter` — permissioned ledger with certificate-based membership (ChainMaker v3). Anchors subject hashes through a one-opcode EVM contract; verification binds the issuer to the member's P-256 key and reports the member organization and finality.
 - `plug.adapters.LiveAdapter` — Ethereum-family adapter (Sepolia by default). Install the `live` extra. Set `SEPOLIA_RPC_URL`; a session brings its key as raw auth material, and `SEPOLIA_PRIVATE_KEY` is the optional default. Attest signs the subject hash, records it on-chain, and sets the attestation's `anchor`. Verify passes only when the signature, the issuer DID, and the on-chain anchor all name the same key and carry the same hash; it reports `anchored_at` and finality.
 - `sketches/` — MCP and CLI sketches. They are not imported by the package.
 
@@ -22,7 +23,12 @@ From this repository:
 pip install -e ".[dev]"      # tests
 pip install -e ".[live]"     # Ethereum-family adapter
 pip install -e ".[suites]"   # Ed25519, P-256, SM2 signature suites
+# ChainMaker adapter: its SDK pins pysha3, which does not build on Python 3.11+.
+pip install -e ".[suites]" safe-pysha3 protobuf grpcio pyyaml cryptography asn1 pyasn1 pyasn1-modules requests pymysql
+pip install --no-deps "chainmaker==3.0.7"
 ```
+
+`scripts/bridge_test.py` proves a fact on a ChainMaker ledger, references it on an Ethereum-family network through the relayer-free bridge, and verifies both sides.
 
 `requirements.txt` lists the same live packages. Core install has no runtime dependencies.
 

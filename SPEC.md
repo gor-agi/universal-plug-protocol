@@ -112,6 +112,8 @@ An agent submits a forecast through prove (fact_type prediction.market), reads c
 
 Every adapter implements the eight core ops. Core exports no concrete backend. Adapters own: key management, RPC or gateway details, finality callbacks, optional persistence, and jurisdiction-specific resolution such as trust-list lookups or status-list polling.
 
+A ledger adapter anchors the subject hash in a transaction the ledger itself authenticates, and on verify confirms that the anchor exists, succeeded, carries exactly the subject hash, and was authorized by the key named in the proof. How the ledger authenticates its senders — account signatures on a public network, certificates checked against organizational trust roots on a permissioned one — is the adapter's concern; the guarantee reported to the caller is the same. The reference implementation includes one adapter of each kind, and `scripts/bridge_test.py` verifies a fact proven on one and referenced on the other.
+
 ## Oracle adapters
 
 Oracle adapters observe external reality — sensors, webhooks, human witnesses, Chainlink-style feeds — and commit observations through prove. The plug never becomes the oracle; it gives oracles a seat at the same table as chains.
