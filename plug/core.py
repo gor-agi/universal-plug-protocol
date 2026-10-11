@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the Universal Plug Protocol project
-"""Universal Plug Protocol core v0.4.0 - network-agnostic attestation and identity interface.
+"""Universal Plug Protocol core v0.5.0 - network-agnostic attestation and identity interface.
 All network-specific logic lives in adapters. This module never imports
 network SDKs or references any specific backend.
 """
@@ -12,7 +12,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-SPEC_VERSION = "0.4.0"
+SPEC_VERSION = "0.5.0"
 
 # The one explicit way to open a permission: trust any authentic issuer, fetch from any public host, or let a
 # model prove any non-reserved fact type. Never a default; every use is logged.
@@ -628,13 +628,18 @@ class Plug:
         return self._adapter(ref.network).query(ref, fields)
 
     def verify(self, att: Attestation, network: Optional[str] = None, trust_registry=None) -> Receipt:
-        net = self._resolve_network(network)
+        return self._verify(att, self._resolve_network(network), trust_registry, require_policy=True)
+
+    def _verify(self, att: Attestation, net: str, trust_registry=None, require_policy: bool = True) -> Receipt:
+        """require_policy=False checks authenticity only (signature, anchor, expiry, batch inclusion), for profiles
+        such as grants where trust is required of a root signer rather than of every attestation in a chain."""
         self._adapter(net)
         for err in (_expiry_error(att.expires_at), _disclosure_error(att.disclosure)):
             if err:
                 return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
+        check = self._verify_trusted if require_policy else (lambda a, n, _r: self._adapter(n).verify(a, n, None))
         if att.inclusion is None:
-            return self._verify_trusted(att, net, trust_registry)
+            return check(att, net, trust_registry)
         root, err = _inclusion_root(att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
@@ -647,7 +652,7 @@ class Plug:
         # The signed batch statement: same issuer, time, and meta, typed plug.batch, naming the member type.
         batch = replace(att, subject_hash=anchored, fact_type="plug.batch", inclusion=None,
                         meta=dict(att.meta, batch_size=size, batch_fact_type=att.fact_type))
-        r = self._verify_trusted(batch, net, trust_registry)
+        r = check(batch, net, trust_registry)
         data = dict(r.data, subject_hash=att.subject_hash, batch_root=root, batch_commitment=anchored,
                     leaf_index=int(att.inclusion["index"]), batch_size=size)
         return Receipt(r.spec_version, r.op, r.status, r.network, r.state_ref, data, r.error, r.seq)

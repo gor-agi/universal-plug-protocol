@@ -1,6 +1,6 @@
 # Universal Plug Protocol Specification
 
-Version 0.4.0
+Version 0.5.0
 
 UPP defines a universal interface for attestations and identity across heterogeneous networks. Eight core operations — connect, identify, attest, query, verify, settle, bridge, subscribe — plus five session operations. Three user-facing verbs: prove, check, watch.
 
@@ -127,7 +127,7 @@ Rules: explicit network beats active session; neither exists means error, not gu
 
 **Reserved commitment domain.** Bridge and batch commitments and statements are canonical JSON objects keyed `plug.bridge`, `plug.batch`, and `plug.statement`. prove and prove_batch refuse any fact whose bytes begin with `{"plug.`, so no proven fact can be presented as one of these commitments, and a single-fact anchor can never pass as a batch root.
 
-Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only by name from a server-side allowlist, never one the model writes. The model does not choose what the server's key vouches for: it may prove only the fact types the operator grants (none by default; `ANY` grants every type outside `agent.`, `control.`, and `incident.`, which must be granted by name), `plug.` types are always refused, calls are rate-limited, and `model_family` and `model_id` are set by the server, never taken from the model. Meta that an adapter dereferences, such as a status list reference, is likewise the operator's to set. Nothing returned to the model carries URLs, endpoints, or host addresses, and each call is bounded in batch size and fact size.
+Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only by name from a server-side allowlist, never one the model writes. The model does not choose what the server's key vouches for: it may prove only the fact types the operator grants (none by default; `ANY` grants every type outside `agent.`, `control.`, `incident.`, and `grant`, which must be granted by name), `plug.` types are always refused, calls are rate-limited, and `model_family` and `model_id` are set by the server, never taken from the model. Meta that an adapter dereferences, such as a status list reference, is likewise the operator's to set. Nothing returned to the model carries URLs, endpoints, or host addresses, and each call is bounded in batch size and fact size.
 
 ## Error model
 
@@ -155,6 +155,30 @@ Rules:
 3. **Containment.** Before each meaningful action, the harness checks the latest `control.halt` and `control.resume` for its actor against the deployment's controller registry, and stops while a valid halt is the most recent. A signal from an issuer outside the registry has no effect.
 4. **Independent rails.** Evidence is anchored on a network the model's operator does not control alone; high-impact actions SHOULD be anchored on more than one.
 5. **Disclosure.** `incident.report` uses salted commitments: the anchor fixes when the disclosure was made, and affected parties receive the fact and the salt.
+
+## Grants profile
+
+Consent, an agent's mandate, and a human's approval of one action are one primitive: a **grant**. A grant is an attestation of fact type `grant`, issued by the grantor, whose signed meta carries:
+
+| Field | Meaning |
+| --- | --- |
+| `grantee` | the DID the grant is to |
+| `scope` | `{key: [allowed values]}`; an action is within it when, for every key, its value is listed: `fact_type`, `subject_hash`, and `network` from the action, any other key (`purpose`, `channel`, ...) from its signed meta; a missing value is outside |
+| `kind` | optional: `consent`, `mandate`, or `approval` |
+| `refs.parent` | for a delegated grant, the statement hash of the grant it derives from |
+
+`expires_at` is required. An approval is a grant whose scope names the one action's `subject_hash` (and network); consent names one purpose per grant and the contact channel, including whether the contact is human or AI.
+
+An action claims authority by naming its grant in signed `meta.refs.grant`. A verifier that requires authority accepts the action only if:
+
+1. the action is authentic;
+2. following `refs.parent` from its grant, each grant names as grantee the party that used it, every grant's scope contains the action, each delegated grant's scope narrows its parent's (every key the parent restricts, the child restricts to a subset), and no grant expires later than its parent or before the action's proven time;
+3. the root grant verifies under the verifier's trust policy for its network (closed by default: authority starts only from a trusted principal; the agents themselves need not be trusted);
+4. no presented revocation applies: a revocation (fact type `grant.revoke`, `meta.refs.revokes` naming a grant's statement hash) counts when issued by that grant's grantor or an ancestor's grantor and proven no later than the action; when either time is unknown it counts. Revocations are final. Withdrawing consent therefore never invalidates actions proven before it (GDPR Art. 7(3)), and short expiry, not revocation, is the first defence.
+
+A chain is judged on one network, the verifier's: an action or grant anchored on another network is rejected, since an anchor is not signed and must not choose the trust policy. Parties are compared by the key or account their DID names, so every spelling of one key (a `#fragment`, address case) is one party, and references are statement hashes compared in lowercase. Verifiers resolve references only from what they are given or can query; nothing is fetched by following a reference.
+
+**References.** `meta.refs` is the one place an attestation names others: `{name: statement hash or [hashes]}`, signed with the statement, so a link cannot be added, removed, or redirected. Recommended names: `grant`, `parent`, `revokes`, `action` (a review, incident, or approval about an action), `data` (consent about a data commitment), and `prev`, the same actor's previous action, which turns an actor's records into a chain in which an omitted or forked record is visible.
 
 ## Prediction-market profile
 
@@ -200,4 +224,5 @@ This appendix is not normative. It lists recurring problems in established attes
 | Hashes differ between implementations because serialization differs | JSON-based credential formats | RFC 8785 canonical form with independently generated conformance vectors |
 | A single operator or identity provider is a point of failure and control | centralized transparency logs, keyless signing | Any rail, issuer-held keys, and verification that trusts neither the issuer nor the operator |
 | An AI model attests to its own actions | agent frameworks with self-reported logs | Agent oversight profile: the harness signs, reviews come from another model family |
+| Agents act with no verifiable "on whose behalf"; consent cannot be proven or withdrawn; approval is replayed | agent frameworks, messaging opt-in, consent banners | Grants profile: one signed, scoped, expiring, revocable grant from a trusted principal; delegation only narrows; withdrawal never undoes earlier actions |
 | A signature covers a hash but not its labels, so a signed fact can be presented under another type, time, or issuer | detached-signature and hash-anchoring schemes | The proof signs and the ledger anchors the statement: subject hash, type, issuer, times, role, and meta together |

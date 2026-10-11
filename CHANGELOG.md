@@ -2,6 +2,17 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.5.0
+
+### Added
+
+- **Grants profile** (SPEC, Grants profile; docs/threat-model.md, G8, P15, P16): consent, agent mandates, and human approvals as one primitive, a signed `grant` with grantee, scope, and expiry. `plug.grants.check_authority` follows an action's grant chain to a principal the trust policy accepts; delegation only narrows; revocation (`grant.revoke`) by the grantor or any ancestor, ordered by proven time, so withdrawn consent never undoes earlier actions. Agents need not be trusted themselves.
+- **Signed references**: `meta.refs` names other attestations by statement hash; `check_sequence` detects skipped or forked records in an actor's `refs.prev` chain.
+- MCP reserves the `grant` prefix: a model issues grants or revocations only if the operator allows those types by name.
+- From review before release: a chain is judged on the verifier's network only (an unsigned anchor on a more open network no longer lends its trust), and revokers and grantees are compared by the key their DID names, so a withdrawal is never lost to a different spelling of the grantor's DID.
+
+The design follows UCAN (attenuation, revocation by ancestors), OAuth RFC 9396 and GNAP (structured scope), Google AP2 (mandates bound to actions), ISO/IEC TS 27560 and Kantara (consent per purpose), and in-toto, SLSA, and SCITT (references by digest).
+
 ## 0.4.1
 
 ### Added

@@ -19,6 +19,7 @@ Status: working document for the 0.3–0.4 security work. It defines, per compon
 - **G5 Cross-implementation agreement.** Two conforming implementations compute identical bytes for every canonical form, digest, commitment, and statement.
 - **G6 Availability under hostile input.** Hostile inputs cost bounded time and memory and never turn an error into acceptance (fail closed).
 - **G7 Closed by default.** Nothing is trusted, fetched, signed, or exposed without the operator's explicit grant. Any grant can be opened, but only explicitly (`ANY`), visibly, and on the record.
+- **G8 Accountable authority.** An action that claims authority can be traced, by verification alone, to the principal who granted it: within the granted scope, before expiry, and not revoked. Delegation only narrows.
 
 ## Problem definitions
 
@@ -150,7 +151,24 @@ Each entry: requirement, attacker control, failure modes, current implementation
 - **Defining.** OWASP ASVS (deny by default), CISA Secure by Design / Secure by Default, NIST SP 800-207 (zero trust); precedents that require explicit verification policy: Sigstore cosign identities, in-toto layouts, TUF roots and delegations, W3C VC verifier trust.
 - **Look for.** A capability or policy framework only if an allowlist cannot express a need. Surveyed: UCAN, Biscuit, macaroons, ZCAP-LD, OAuth scopes; none is needed for allowlists of issuers, hosts, and fact types.
 
-## Status and decisions (0.4.1)
+### P15 Grants: consent, mandates, approvals
+
+- **Requirement.** One primitive covers a data subject's consent, a principal's mandate to an agent, and a human's approval of one proposed action: a statement signed by the grantor that names the grantee, a scope, and an expiry, and that can be revoked. A delegated grant is valid only if every scope it states is within its parent's and its grantor is the parent's grantee. A verifier that requires a grant rejects an action whose grant is missing, from a grantor outside its trust policy, expired at the proven time, revoked, or out of scope, and does so closed by default. Withdrawing consent is as easy as giving it (GDPR Art. 7(3)).
+- **Attacker controls.** The grantee (an agent, a processor) presents the grant and may reuse, widen, replay, or outlive it; a compromised agent may forge approvals; grants and revocations may be withheld from the verifier.
+- **Failure.** An action passes on an expired, revoked, widened, or someone else's grant (G8); consent cannot be proven or withdrawn; approval is replayed for a different action.
+- **Current.** Agent oversight has `agent.action`, `agent.review`, and halt/resume containment; consent and mandates are not expressible; approval exists only as after-the-fact review.
+- **Defining.** GDPR Art. 7; ISO/IEC TS 27560 consent records; Kantara Consent Receipt; OAuth RFC 9396 (authorization details), RFC 8693 (actor, may_act); UCAN delegation and revocation; Google AP2 mandates; EU AI Act Art. 14 (human oversight).
+- **Look for.** The smallest field set and revocation model those precedents agree on, and whether any library verifies them for us.
+
+### P16 Signed references between attestations
+
+- **Requirement.** An attestation can name other attestations by statement hash inside its signed meta, so the link cannot be added, removed, or redirected without voiding the proof. Verifiers resolve references only from objects they are given or can query, and a per-actor chain of previous actions makes an omitted or forked record detectable.
+- **Attacker controls.** Which referenced objects are presented; ordering and omission of an actor's records.
+- **Failure.** A review, incident, consent, or grant points at a different object than the one presented; skipped actions go unnoticed.
+- **Current.** `agent.review` references a receipt hash in an unspecified meta key; nothing else links.
+- **Defining.** W3C VC `evidence`; in-toto and SLSA material links by digest; C2PA ingredients; IETF SCITT.
+
+## Status and decisions (0.5.0)
 
 Decided after researching existing solutions for each problem and auditing the code against these definitions. "Oracle" means the third-party implementation or vectors run in our tests against our code.
 
@@ -170,6 +188,8 @@ Decided after researching existing solutions for each problem and auditing the c
 | P12 Keys | Signer interface: `KeySigner` (in process) and `Pkcs11Signer` (HSM or SoftHSM; P-256 and Ed25519); `sign_attestation(signer, att)` | SoftHSM2 token in CI: proofs signed inside the token verify, keys are non-extractable | secp256k1 (Ethereum transactions) and SM2 keys stay in process: SoftHSM lacks those curves, and cloud KMS (AWS/GCP support secp256k1) cannot be tested here without accounts |
 | P13 Ledger reads | The Ethereum adapter takes extra read endpoints; every read verification relies on must agree across all, finality is the weakest reported. A Helios light client is one such endpoint (it serves verified JSON-RPC) | tests with a lying and a lagging endpoint | ChainMaker: its SPV node is Go-only; run it as a sidecar read endpoint when an adapter for it is added |
 | P14 Closed by default | One permission shape (grant list or explicit, logged `ANY`), caller narrows only, misconfiguration fails | dedicated permission tests | — |
+| P15 Grants | One primitive (`grant`, `grant.revoke`) for consent, mandates, approvals; `plug.grants.check_authority` follows the chain to a root grantor the trust policy accepts; narrowing per UCAN and RFC 9396; revocation by grantor or any ancestor, ordered by proven time (UCAN; GDPR Art. 7(3)); consent per purpose and channel (ISO/IEC TS 27560, Kantara) | `tests/test_grants.py`, including withdrawal ordering on a ledger | — |
+| P16 References | Signed `meta.refs` by statement hash, never dereferenced automatically (in-toto, SLSA, SCITT); `check_sequence` detects skipped and forked records via `refs.prev` | `tests/test_grants.py` | — |
 
 ## External audit
 

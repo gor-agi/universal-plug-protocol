@@ -22,7 +22,7 @@ from .core import ANY, Attestation, Plug, PlugError, Receipt, StateRef, canon_fa
 
 # Fact types the model may not have the server sign unless the operator allowlists them: oversight evidence
 # about the model itself, and plug.* commitments, which only the plug produces (never allowlistable).
-RESERVED_FACT_TYPES = ("agent.", "control.", "incident.", "plug.")
+RESERVED_FACT_TYPES = ("agent.", "control.", "incident.", "grant", "plug.")  # grant: grants and revocations
 _MODEL_META = ("model_family", "model_id")
 
 

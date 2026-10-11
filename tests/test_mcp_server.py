@@ -94,7 +94,8 @@ def test_model_cannot_choose_oversight_fact_types_or_its_own_identity():
         p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
         stamped = build_server(p, model={"model_family": "family-a", "model_id": "m-7"}, fact_types=ANY)
         async with Client(stamped) as client:
-            for ft in ("agent.action", "agent.review", "control.resume", "incident.report", "plug.batch"):
+            for ft in ("agent.action", "agent.review", "control.resume", "incident.report", "plug.batch", "grant",
+                       "grant.revoke"):
                 out = await call(client, "prove", fact="x", fact_type=ft)
                 assert out.get("error", "").startswith("not_authorized"), ft
             out = await call(client, "prove", fact="x", fact_type="doc.sha256",

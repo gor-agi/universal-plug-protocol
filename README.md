@@ -68,6 +68,20 @@ plug.trust("eudi", {"issuers": [cred["issuer"]]})   # the credential issuer's ke
 - `verify_sd_jwt_vc` (RFC 9901, SD-JWT VC) checks the issuer's X.509 chain to those anchors, the issuer signature, `typ`, validity, that every disclosure matches exactly one signed digest, and, when you pass an audience or nonce, the key binding JWT.
 - `verify_mdoc` (ISO/IEC 18013-5) checks the chain, the COSE signature, validity, docType, and every disclosed element's digest.
 
+## Grants: consent, mandates, approvals
+
+One primitive for "on whose behalf": a grant is a signed attestation from a grantor to a grantee with a scope and an expiry, and an action names its grant in signed `meta.refs`. `check_authority` accepts the action only through a chain of grants that narrows at each step, reaches a principal the trust policy accepts, and is not revoked.
+
+```python
+from plug.grants import make_grant, make_revocation, check_authority
+
+mandate = make_grant(principal_did, agent_did, {"fact_type": ["agent.action"]}, expires_at="2026-12-31T00:00:00Z")
+# sign and attest it from the principal's session; the agent's action carries meta={"refs": {"grant": <its statement hash>}}
+verdict = check_authority(plug, action, [mandate], revocations)
+```
+
+Consent is a grant scoped by `purpose` and `channel`; an approval is a grant scoped to one action's `subject_hash`. Withdrawing consent (`make_revocation`) never invalidates actions proven before it.
+
 ## Closed by default
 
 Nothing is trusted, fetched, or signed until the operator grants it, and `ANY` is the one explicit, logged way to open a grant:
