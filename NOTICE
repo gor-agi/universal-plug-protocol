@@ -1,0 +1,12 @@
+Universal Plug Protocol
+Copyright Contributors to the Universal Plug Protocol project
+
+This product includes software developed by the contributors to the
+Universal Plug Protocol project and is licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+Optional third-party components used at runtime, not distributed with this
+product:
+  - gmssl (BSD) for SM2 curve arithmetic
+  - pycryptodome (BSD, Public Domain) for Ed25519 and P-256
+  - web3, eth-account, eth-keys (MIT) for the Ethereum adapter

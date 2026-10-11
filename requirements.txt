@@ -1,0 +1,5 @@
+# Core has zero runtime dependencies.
+# Live adapter (optional). Same packages as the `live` extra in pyproject.toml:
+web3>=7.0
+eth-account>=0.13
+eth-keys>=0.5

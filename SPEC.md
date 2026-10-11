@@ -1,0 +1,121 @@
+# Universal Plug Protocol Specification
+
+Version 0.2.0
+
+UPP defines a universal interface for attestations and identity across heterogeneous networks. Eight core operations — connect, identify, attest, query, verify, settle, bridge, subscribe — plus five session operations. Three user-facing verbs: prove, check, watch.
+
+This document is the canonical reference. The implementation must match it; where they diverge, the spec wins.
+
+## Design principles
+
+- **Rail-neutral.** The plug carries attestations and identity. It does not own markets, tokens, or governance. Currency is the current settlement reality; value-net direction is roadmap context only.
+- **Op budget.** Thirteen operations total. Any new op must delete or demote an existing one.
+- **No token ops.** No mint, burn, swap, or stake. If a network adds a compliant token layer, that folds into settle or becomes a fourteenth op by explicit decision.
+- **Fixed Receipt, open vocabularies.** Receipt shape is locked. Fact types, settle op names, and error extensions are open strings with recommended sets.
+- **Anti-bloat.** Thin, inspectable, agent-facing. Every addition must earn its place against the three verbs.
+- **Jurisdiction-agnostic.** Privacy and trust primitives are expressed as constraints and optional parameters, never as European-specific or national-specific features. Any deployment profile — EU, sovereign fabric, enterprise — satisfies its rules through adapters and configuration, not core changes.
+
+## Core types
+
+- **Identity** — did (string), method (string: key, web, or network-native). DID-method guidance: per-presentation pseudonyms are recommended for privacy-sensitive deployments; core is agnostic, adapters and DID methods own the mechanism.
+- **Credential** — issuer, subject, hash, claims, proof. Maps to W3C Verifiable Credentials where applicable.
+- **Attestation** — subject_hash (hex, 32 bytes), hash_alg (sha-256 default; sha3-256, sm3), fact_type (open vocabulary, canonicalized to lowercase dotted), issuer (DID), issued_at / expires_at (ISO-8601), proof ({alg, sig, verification_method}), optional role tag, optional meta. Optional salted-hash structure for selective disclosure: {salt, hash} pairs alongside the subject hash, enabling verifiers to check disclosed fields without revealing undisclosed ones. No new op — payload schema only. Optional anchor (StateRef): where the subject hash was recorded. Ledger adapters set it on a successful attest and require it on verify.
+- **StateRef** — network, address, kind (asset, ownership, event, market).
+- **Receipt** — spec_version (semver), op, status (ok, pending, rejected, error), network, optional state_ref, data, optional error, seq. Canonical serialization is RFC 8785 (JSON Canonicalization Scheme); no library is required to parse. Ledger adapters report finality inside data as `finality: {kind: final | probabilistic, confirmations}`; the receipt shape does not change.
+- **NetworkKind** — advisory label only (public, permissioned, enterprise, sovereign). Not enforced by core. Sovereign is the umbrella category: a public chain is sovereign in consensus, a national fabric in governance, Holochain per-agent, an enterprise chain within its org.
+
+## Role tag
+
+Optional on Attestation: execution, preference, identity, asset. Distinguishes a vote attestation from a supply-chain one without coupling core to any governance model.
+
+## Canonical form and hashing
+
+Structured facts are serialized with RFC 8785 before hashing, so every implementation, in any language, derives the same subject hash. Integers beyond 2^53 are carried as strings (I-JSON, RFC 7493). Bytes are hashed as-is; text is hashed as UTF-8.
+
+The hash algorithm is deployment configuration, never a core change: sha-256 by default, sha3-256, or sm3 (GB/T 32905) where a profile mandates it. Every supported algorithm yields 32 bytes, so ledger anchors are the same size everywhere. The attestation names its hash_alg.
+
+### Salted commitments (personal data)
+
+A plain hash of low-entropy data — a name, an email, an ID number — can be reversed by hashing guesses, so it remains personal data and cannot be erased from a ledger. With `commitment = salted`, prove anchors H(salt ‖ fact) under a fresh 32-byte salt. The salt is returned to the caller in the receipt and never passed to an adapter or logged. Whoever holds the fact and the salt can open the commitment; nobody else can link it. Deleting the salt and the fact leaves the anchor unlinkable, which is how a ledger deployment honours erasure (GDPR Art. 17, EDPB Guidelines 02/2025) without rewriting history. Only the hash crosses a border; the fact and the salt stay where the data lives. Idempotent retries key on the unsalted digest in memory only.
+
+## Signature suites
+
+Every suite signs the same message, the 32-byte subject hash, and applies its own standard to it:
+
+| alg | standard | verification_method |
+| --- | --- | --- |
+| ecdsa-secp256k1 | ECDSA, subject hash as digest (Ethereum-compatible) | 0x account address |
+| ed25519 | PureEdDSA, RFC 8032 | did:key |
+| ecdsa-p256 | ECDSA P-256 with SHA-256 (ES256), r‖s | did:key |
+| sm2-sm3 | SM2 with SM3, distinguishing ID 1234567812345678 (GB/T 32918.2, GM/T 0009), r‖s | did:key |
+
+A proof is valid only when its signature verifies and the issuer DID names the same key: did:key names itself; did:plug:&lt;network&gt;:&lt;address&gt; and did:pkh:eip155:&lt;chain&gt;:&lt;address&gt; name an account. An issuer whose DID method an adapter cannot resolve is unverifiable, never assumed valid. New suites are added by registration, not by new ops.
+
+## Conformance
+
+`spec/vectors/` holds language-neutral test vectors generated by an independent implementation (`generate_jcs.mjs`, Node). An implementation conforms when it reproduces every canonical form and digest there. Signature suites are cross-checked against OpenSSL 3 in both directions.
+
+## Eight core ops
+
+1. **connect** — alias of open. Network handle plus auth (scheme + material). Returns session.
+2. **identify** — prove who you are on a network. Takes network plus Identity.
+3. **attest** — hash a real-world fact, sign, bind to a record. Core op.
+4. **query** — read ledger state back via StateRef.
+5. **verify** — check someone else's attestation against that network's rules. Never trusts the issuer. Optional trust_registry parameter: a URL, an inline registry document, or a StateRef pointing at a published issuer registry. Core passes it through; adapters resolve it. Not enforced by core.
+
+   On a ledger network, verify is valid only when all of these hold: the signature recovers to `verification_method`; the issuer DID names that same key; the anchor exists on this network, succeeded, was sent by that key, and carries the subject hash. The receipt reports the anchor block, its timestamp as `anchored_at`, and finality. A signature alone proves possession of a key, not that a fact was recorded or when.
+
+A URL registry is a JSON object `{"issuers": ["did:...", ...]}`. `issuers` is a non-empty list of strings. Adapters fetch it with HTTP or HTTPS only, a 5 second timeout, a 64 KiB cap, and no redirect off http(s). The attestation issuer must be in that list. A StateRef registry is resolved by query. The same membership check applies when the queried record contains an `issuers` list.
+6. **settle** — final writes: transfer, register, revoke, plus network-native ops via passthrough op name.
+7. **bridge** — reference a proof made on one network from another. No relayer and no bridge operator is trusted. When both networks are plugged in, the plug queries the source proof, then attests the commitment H(JCS({"plug.bridge": source StateRef})) on the target as fact type `plug.bridge`, signed by the target session. The bridge receipt carries the source reference and the target attestation. `check(bridge receipt)` verifies both sides independently: the source proof is ok, the target anchors exactly that commitment, and the target attestation verifies under its network's rules. Only the reference crosses; value never does. Without a target adapter, the source adapter may publish the reference on the source network, and the receipt stays pending there.
+8. **subscribe** — event stream for a StateRef.
+
+Every op takes a network handle plus a canonical payload and returns a canonical Receipt. Adapters translate; core never sees network internals.
+
+## Five session ops
+
+open, use, close, active, list_sessions.
+
+Rules: explicit network beats active session; neither exists means error, not guess. A session binds to exactly one network. Credential material never surfaces above the adapter layer. Each session signs with its own credential; core names the active session's subject to the adapter before settle and bridge. Sessions are process-local by default; persistence is adapter-owned.
+
+## Three user-facing verbs
+
+- **prove(fact, fact_type, network?, meta?)** → Receipt. Fact is any bytes, JSON, or file reference.
+- **check(target, network?)** → {valid: bool, receipt}. Target is an Attestation, StateRef, or DID string.
+- **watch(target, filter?)** → stream handle. Target is a StateRef.
+
+Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe.
+
+## Error model
+
+Nine codes: auth_failed, not_found, not_authorized, unsupported_op, proof_invalid, timeout, rate_limited, bridge_unsupported, finality_unknown. Each carries a retryable flag. timeout, rate_limited, finality_unknown are retryable; the rest are not.
+
+## Idempotency invariant
+
+Receipt hash covers spec_version, op, network, subject_hash, fact_type, issuer, role — never seq. The same subject attested by a different issuer, or under a different fact type, is a different attestation. The plug maintains a 24-hour idempotency cache keyed on that hash. Only ok and pending receipts are cached; a rejected or error receipt is retried on the next call. On a cache hit, the cached receipt is cloned and stamped with the call's fresh seq before return. Settle and bridge bypass the cache by design: they have no subject hash to key on. This is documented, not implicit.
+
+## Diversity signal
+
+Attestation meta may carry model_family (open string) and optional model_id. Over the last 20 prediction.market attestations per market, if distinct families divided by window size drops below 0.3, the plug emits one prediction.monoculture warning attestation per market per 24 hours — edge-triggered, not level-triggered. Warning subject hashes include a nonce so each emission is unique; no dedup is expected or required.
+
+## Three layers
+
+1. **Attestations — prove.** Binds what happened. Consumers: agents checking counterparty history, oracles, auditors.
+2. **Credentials — check.** Identity, authorization, role legitimacy.
+3. **Settlement — watch.** Event streams, finality, value movement. Currency enters last, as the final strand.
+
+## Prediction-market loop
+
+An agent submits a forecast through prove (fact_type prediction.market), reads consensus through check against a market aggregate StateRef, and reacts through watch on resolution events. The plug makes every step machine-readable; it does not own the market.
+
+## Adapter contract
+
+Every adapter implements the eight core ops. Core exports no concrete backend. Adapters own: key management, RPC or gateway details, finality callbacks, optional persistence, and jurisdiction-specific resolution such as trust-list lookups or status-list polling.
+
+## Oracle adapters
+
+Oracle adapters observe external reality — sensors, webhooks, human witnesses, Chainlink-style feeds — and commit observations through prove. The plug never becomes the oracle; it gives oracles a seat at the same table as chains.
+
+An oracle adapter implements the eight core ops like any backend. Its distinctive responsibility: the attest path takes an external observation (a reading, a document hash, a GPS fix), hashes it as the subject, and signs with the oracle's own key. Query returns the latest committed observation for a StateRef. Verify checks the oracle's signature and optionally a trust registry of authorized oracles. Subscribe polls for new observations.
+
+No new ops. No oracle-specific vocabulary in core. Fact types remain an open vocabulary — sensor.reading, gps.fix, doc.sha256 are recommendations, not mandates. The oracle's trustworthiness is a property of the adapter's key and its registry, not of the plug.

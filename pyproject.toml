@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "plug"
+version = "0.2.0"
+description = "Network-agnostic layer for attestations and identity across public, permissioned, enterprise, and sovereign networks."
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Topic :: Internet :: Internet",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "coverage>=7"]
+live = ["web3>=7.0", "eth-account>=0.13", "eth-keys>=0.5"]
+suites = ["pycryptodome>=3.20", "gmssl>=3.2.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["plug"]

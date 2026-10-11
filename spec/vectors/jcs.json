@@ -1,0 +1,227 @@
+{
+  "generator": "node v25.6.1",
+  "rfc": "RFC 8785",
+  "numbers": [
+    {
+      "bits": "0000000000000000",
+      "canonical": "0"
+    },
+    {
+      "bits": "8000000000000000",
+      "canonical": "0"
+    },
+    {
+      "bits": "0000000000000001",
+      "canonical": "5e-324"
+    },
+    {
+      "bits": "8000000000000001",
+      "canonical": "-5e-324"
+    },
+    {
+      "bits": "7fefffffffffffff",
+      "canonical": "1.7976931348623157e+308"
+    },
+    {
+      "bits": "ffefffffffffffff",
+      "canonical": "-1.7976931348623157e+308"
+    },
+    {
+      "bits": "4340000000000000",
+      "canonical": "9007199254740992"
+    },
+    {
+      "bits": "c340000000000000",
+      "canonical": "-9007199254740992"
+    },
+    {
+      "bits": "4430000000000000",
+      "canonical": "295147905179352830000"
+    },
+    {
+      "bits": "44b52d02c7e14af5",
+      "canonical": "9.999999999999997e+22"
+    },
+    {
+      "bits": "44b52d02c7e14af6",
+      "canonical": "1e+23"
+    },
+    {
+      "bits": "44b52d02c7e14af7",
+      "canonical": "1.0000000000000001e+23"
+    },
+    {
+      "bits": "444b1ae4d6e2ef4e",
+      "canonical": "999999999999999700000"
+    },
+    {
+      "bits": "444b1ae4d6e2ef4f",
+      "canonical": "999999999999999900000"
+    },
+    {
+      "bits": "444b1ae4d6e2ef50",
+      "canonical": "1e+21"
+    },
+    {
+      "bits": "3eb0c6f7a0b5ed8c",
+      "canonical": "9.999999999999997e-7"
+    },
+    {
+      "bits": "3eb0c6f7a0b5ed8d",
+      "canonical": "0.000001"
+    },
+    {
+      "bits": "41b3de4355555553",
+      "canonical": "333333333.3333332"
+    },
+    {
+      "bits": "41b3de4355555554",
+      "canonical": "333333333.33333325"
+    },
+    {
+      "bits": "41b3de4355555555",
+      "canonical": "333333333.3333333"
+    },
+    {
+      "bits": "41b3de4355555556",
+      "canonical": "333333333.3333334"
+    },
+    {
+      "bits": "41b3de4355555557",
+      "canonical": "333333333.33333343"
+    },
+    {
+      "bits": "becbf647612f3696",
+      "canonical": "-0.0000033333333333333333"
+    },
+    {
+      "bits": "43143ff3c1cb0959",
+      "canonical": "1424953923781206.2"
+    },
+    {
+      "bits": "3ff0000000000000",
+      "canonical": "1"
+    },
+    {
+      "bits": "4035800000000000",
+      "canonical": "21.5"
+    },
+    {
+      "bits": "3f50624dd2f1a9fc",
+      "canonical": "0.001"
+    },
+    {
+      "bits": "3e7ad7f29abcaf48",
+      "canonical": "1e-7"
+    },
+    {
+      "bits": "4202a05f20000000",
+      "canonical": "10000000000"
+    },
+    {
+      "bits": "c202a05f20000000",
+      "canonical": "-10000000000"
+    },
+    {
+      "bits": "3fb999999999999a",
+      "canonical": "0.1"
+    },
+    {
+      "bits": "3fd3333333333333",
+      "canonical": "0.3"
+    }
+  ],
+  "objects": [
+    {
+      "input": "{\"numbers\":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],\"string\":\"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\",\"literals\":[null,true,false]}",
+      "canonical": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+      "sha-256": "2d5e01a318d0f0879ab568c4be289c8b1f64ef8921a53c6277d5e069978baacb",
+      "sha3-256": "ed47bc19a01986061d6f4496edcd2c8498bc87809becef83f4d44a67b171f4e0",
+      "sm3": "728a8c2ccd62d32b22734d513f2ff97104ef6cc3cf646891c98ee3a9e21d9cba"
+    },
+    {
+      "input": "{\"\\u20ac\":\"Euro Sign\",\"\\r\":\"Carriage Return\",\"\\ufb33\":\"Hebrew Letter Dalet With Dagesh\",\"1\":\"One\",\"\\ud83d\\ude00\":\"Emoji: Grinning Face\",\"\\u0080\":\"Control\",\"\\u00f6\":\"Latin Small Letter O With Diaeresis\"}",
+      "canonical": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\":\"Control\",\"ö\":\"Latin Small Letter O With Diaeresis\",\"€\":\"Euro Sign\",\"😀\":\"Emoji: Grinning Face\",\"דּ\":\"Hebrew Letter Dalet With Dagesh\"}",
+      "sha-256": "5e321556d22018a9656991a9e94f77ec175fa193e52a2429d312f8419ec8b08c",
+      "sha3-256": "6860181ff98a702b34e9c98dc577fbfa6a96f400bd297d8faf35459602c2a09c",
+      "sm3": "f914e407e6509650d01a6fd8c959082bd6b8e44a7a786dc224f0dee7e2e20f0d"
+    },
+    {
+      "input": "{\"temp\":21.5,\"unit\":\"C\",\"sensor\":\"alpha\"}",
+      "canonical": "{\"sensor\":\"alpha\",\"temp\":21.5,\"unit\":\"C\"}",
+      "sha-256": "45e2b2473c91873f603b4b9a3af29552bc8af1d59497622cf6fe719abdf1ccda",
+      "sha3-256": "f1eaa7020965abdc36efde2ad2e650208c8bd2469e23ef087f9f46f1a16239d8",
+      "sm3": "314a54a3d7310d1b5b2ef0baa4fef8585960ecbd048c738e54d9612c4990cec3"
+    },
+    {
+      "input": "{\"b\":[3,{\"z\":1,\"a\":[]}],\"a\":{\"y\":2.0,\"x\":-0.0}}",
+      "canonical": "{\"a\":{\"x\":0,\"y\":2},\"b\":[3,{\"a\":[],\"z\":1}]}",
+      "sha-256": "97db3d5291a779e80c1a85ac678b328a6211a6ad56b0c034a907520c7b2813a9",
+      "sha3-256": "2850e4af22183f9925a3942b793bf0a799d91fb121ec667973cb55aa9bb082ec",
+      "sm3": "51085b23e4c1519e4a215939812e4cf065ddf07cc84d9e87cbccf1bbb3b3c118"
+    },
+    {
+      "input": "{\"cargo\":\"\\u94dc\\u7cbe\\u77ff\",\"port\":\"Shanghai\",\"bl\":\"\\u65e0\\u7eb8\\u5316-001\",\"weight_t\":2500.75}",
+      "canonical": "{\"bl\":\"无纸化-001\",\"cargo\":\"铜精矿\",\"port\":\"Shanghai\",\"weight_t\":2500.75}",
+      "sha-256": "e5e78361214f5df8a93113245c2d1ba9b1c8c24db93f06603d68b2bfbd22afcc",
+      "sha3-256": "f9b94f6ffa365ee9b6390ddbf93f732d3ecaace059fe9572fd0fa9c4fe80b597",
+      "sm3": "b15e3e8daa814887612a3e8f6072630afcf0c79703427da064cbd49bae9ac32b"
+    },
+    {
+      "input": "{\"emissions_tco2e\":1.234e-4,\"installation\":\"DE-123\",\"period\":\"2026-Q3\"}",
+      "canonical": "{\"emissions_tco2e\":0.0001234,\"installation\":\"DE-123\",\"period\":\"2026-Q3\"}",
+      "sha-256": "e81dd69be8f6358633fd4b6c156a754f178b41559bb0f09c1c35b25d800114a2",
+      "sha3-256": "1b32995c360073b10b23c8d62bc1d3344eb4eec41c0cfec0c945350b0db6dd90",
+      "sm3": "586520b4f2da897709dce34dbb7ee180f8156a84dcfa503b4dcef356192ad5cd"
+    },
+    {
+      "input": "[]",
+      "canonical": "[]",
+      "sha-256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "sha3-256": "ca4510738395af1429224dd785675309c344b2b549632e20275c69b15ed1d210",
+      "sm3": "653559f7625310a8dcf0cb77c137643a67aedf3f247c66b1b06ff4a04f4c0a8b"
+    },
+    {
+      "input": "{}",
+      "canonical": "{}",
+      "sha-256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "sha3-256": "840eb7aa2a9935de63366bacbe9d97e978a859e93dc792a0334de60ed52f8e99",
+      "sm3": "f1a823aaaaafe40e113c7f04dd72c289faf86252c4a9b57cf1d3c9e12547f9ad"
+    },
+    {
+      "input": "\"plain\"",
+      "canonical": "\"plain\"",
+      "sha-256": "945603a8f587786b463c3f94fce115c0fae88fac2728cc96ddf5981cf7f61741",
+      "sha3-256": "f7d9e561e14cfdcb795af871cd0c0b1c2ff25336616a67611138495a953f42b6",
+      "sm3": "340cbc19e541e0c67d440200590e173b09ec7b6efdede408f3ed34bf2171599f"
+    },
+    {
+      "input": "1e21",
+      "canonical": "1e+21",
+      "sha-256": "241c4643fa70b1dcde1205b71be4e3bebb17e9f880c8e1a33d0ead6c27271d3c",
+      "sha3-256": "46b5f1dd27a0bf1ca22060ce050cb2ba6da4473bec866e80fbd886adcd136523",
+      "sm3": "1a9763711ecf8228d8c6782c2f9a2369e0661f11481fefd10b4b68c7503e294f"
+    },
+    {
+      "input": "1e-7",
+      "canonical": "1e-7",
+      "sha-256": "5b33e02f2c5103a05d32f6ba9cb058294452bfbf393967f68bb30c1bdcbbab22",
+      "sha3-256": "e754d1c9e83afd585becd847c4c74932b8061ff2f9bdce4da141f9cbb37a408a",
+      "sm3": "1290d0f7686018cafa59ccd8ba7ecaa0f7ed9225979bc19547964a504c6fe66b"
+    },
+    {
+      "input": "100",
+      "canonical": "100",
+      "sha-256": "ad57366865126e55649ecb23ae1d48887544976efea46a48eb5d85a6eeb4d306",
+      "sha3-256": "46b55626ab805350ea5f08f3592bd81298c12f2fee1d6040d1b8b3c7b490d966",
+      "sm3": "f98c0184dca7c0bc43be8682bba28c5e263fe915e1a36312f4f4bdd7018f117b"
+    },
+    {
+      "input": "-1.5",
+      "canonical": "-1.5",
+      "sha-256": "37c2b212b94e5372b33df924ea2a91182d90c237d0bf942c1768e794ebef2376",
+      "sha3-256": "5c96c7ee72aaa31ece37d27468724997afb7f270ddf27a1b115bee37c3befeff",
+      "sm3": "695c3a8884cc55dc76da1dd3f699d601f19a8d5e1db2dbae3e01496515635d0c"
+    }
+  ]
+}
