@@ -23,6 +23,8 @@ from .base import (
 
 _DEFAULT_STATUS_LIST_POLL = 300  # 5 minutes
 _DEFAULT_STATUS_LIST_MAX_STALE = 3600  # longest a cached token stands in while the list cannot be fetched
+_DEFAULT_STATUS_LIST_MAX_AGE = 86400   # oldest signed iat accepted when the token names no ttl
+_CLOCK_SKEW = 300
 _STATUS_LIST_MAX_BYTES = 1 << 20          # fetched Status List Token
 _STATUS_LIST_MAX_DECODED = 16 << 20       # decompressed status byte array
 _STATUS_NAMES = {1: "revoked", 2: "suspended"}
@@ -94,6 +96,8 @@ class EudiAdapter(InMemoryAdapter):
     status_list_poll : most seconds a fetched Status List Token is reused (a shorter token ttl wins)
     status_list_max_stale : most seconds a cached token stands in while a fresh one cannot be fetched or
                verified (a shorter token ttl wins); never past the token's exp
+    status_list_max_age : oldest a token's signed iat may be; a token with a ttl is also refused once
+               iat is older than ttl + status_list_max_stale, however recently it was fetched
     credential_formats : accepted formats (sd-jwt-vc, mso-mdoc)
 
     A credential that references a status list carries meta {"status": {"status_list": {"idx", "uri"}}}
@@ -109,11 +113,13 @@ class EudiAdapter(InMemoryAdapter):
     def __init__(self, trusted_lists: Optional[list[str]] = None,
                  status_list_poll: int = _DEFAULT_STATUS_LIST_POLL,
                  credential_formats: Optional[list[str]] = None,
-                 status_list_max_stale: int = _DEFAULT_STATUS_LIST_MAX_STALE):
+                 status_list_max_stale: int = _DEFAULT_STATUS_LIST_MAX_STALE,
+                 status_list_max_age: int = _DEFAULT_STATUS_LIST_MAX_AGE):
         super().__init__()
         self.trusted_lists = trusted_lists or []
         self.status_list_poll = status_list_poll
         self.status_list_max_stale = status_list_max_stale
+        self.status_list_max_age = status_list_max_age
         self.credential_formats = credential_formats or ["sd-jwt-vc", "mso-mdoc"]
         self._status_tokens: dict[str, tuple] = {}  # uri -> (parsed token, fetched at)
 
@@ -154,18 +160,27 @@ class EudiAdapter(InMemoryAdapter):
         self._status_tokens[uri] = (parsed, now)
         return claims
 
-    @staticmethod
-    def _validated(parsed: tuple, uri: str, att: Attestation, data: dict, now: float) -> dict:
+    def _validated(self, parsed: tuple, uri: str, att: Attestation, data: dict, now: float) -> dict:
         """The token's claims once its type, subject, times, and issuer signature hold; else raise."""
         header, claims, signing_input, signature = parsed
         if header.get("typ") != "statuslist+jwt":
             raise PlugError("proof_invalid", "status list token typ is not statuslist+jwt")
         if claims.get("sub") != uri:
             raise PlugError("proof_invalid", "status list token sub does not match the reference uri")
-        if not isinstance(claims.get("iat"), (int, float)) or isinstance(claims.get("iat"), bool):
+        iat = claims.get("iat")
+        if not isinstance(iat, (int, float)) or isinstance(iat, bool):
             raise PlugError("proof_invalid", "status list token has no iat")
         if _expired(claims, now):
             raise PlugError("proof_invalid", "status list token expired")
+        if iat > now + _CLOCK_SKEW:
+            raise PlugError("proof_invalid", "status list token iat is in the future")
+        # Freshness is judged from the signed iat, not from when this process fetched the token.
+        ttl = claims.get("ttl")
+        limit = self.status_list_max_age
+        if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl > 0:
+            limit = min(limit, ttl + self.status_list_max_stale)
+        if now - iat > limit:
+            raise PlugError("proof_invalid", "status list token is too old")
         from ..suites import issuer_key, verify_jws
         listed = (((data.get("trust_registry") or {}).get("keys") or {}).get(att.issuer)) or []
         keys = [e["verification_method"] for e in listed]
@@ -215,28 +230,39 @@ class EudiAdapter(InMemoryAdapter):
             return None
         return f"proof_invalid: {_STATUS_NAMES.get(value, f'status 0x{value:02x}')} via status list"
 
+    def _operator_registry(self, net: str) -> dict | Receipt | None:
+        """The configured trusted lists merged into one registry, or a rejection if any cannot be read."""
+        if not self.trusted_lists:
+            return None
+        all_issuers: list = []
+        all_keys: dict[str, list] = {}
+        for url in self.trusted_lists:
+            try:
+                doc = fetch_registry(url)
+            except PlugError as e:
+                return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
+                               error=f"{e.code}: trusted list {url}: {e.message}")
+            all_issuers.extend(doc["issuers"])
+            for did, entries in doc.get("keys", {}).items():
+                all_keys.setdefault(did, []).extend(entries)
+        return {"issuers": list(dict.fromkeys(all_issuers)), **({"keys": all_keys} if all_keys else {})}
+
     def verify(self, att: Attestation, network: str, trust_registry=None) -> Receipt:
         net = network or "default"
-        # EUDI: resolve ETSI trusted lists first if configured and no explicit registry
-        if self.trusted_lists and not trust_registry:
-            all_issuers: list = []
-            all_keys: dict[str, list] = {}
-            for url in self.trusted_lists:
-                try:
-                    doc = fetch_registry(url)
-                    all_issuers.extend(doc["issuers"])
-                    for did, entries in doc.get("keys", {}).items():
-                        all_keys.setdefault(did, []).extend(entries)
-                except PlugError as e:
-                    return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
-                                   error=f"{e.code}: trusted list {url}: {e.message}")
-            if all_issuers:
-                trust_registry = {"issuers": list(dict.fromkeys(all_issuers)),
-                                  **({"keys": all_keys} if all_keys else {})}
-        trust = resolve_trust_registry(self.query, trust_registry, net, att.issuer)
+        # The operator's trusted lists always apply; a caller's registry can only narrow them.
+        operator = self._operator_registry(net)
+        if isinstance(operator, Receipt):
+            return operator
+        trust = resolve_trust_registry(self.query, operator if operator else trust_registry, net, att.issuer)
         if isinstance(trust, Receipt):
             return trust
         data = dict(trust or {})
+        caller = None
+        if operator and trust_registry is not None:
+            caller = resolve_trust_registry(self.query, trust_registry, net, att.issuer)
+            if isinstance(caller, Receipt):
+                return caller
+            data["caller_trust_registry"] = caller["trust_registry"]
         err = anchor_error(self._store, net, att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
@@ -244,6 +270,12 @@ class EudiAdapter(InMemoryAdapter):
         signed = check_signature(att, net, data)
         if signed.status != Status.OK:
             return signed
+        if caller:
+            now = datetime.now(timezone.utc)
+            _, err = registry_key_status(caller, att.issuer, signed.data["verification_method"], now)
+            if err:
+                return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
+                               data=dict(signed.data, verified=False), error=f"{err} (caller registry)")
         err = self._status_error(att, signed.data)
         if err:
             rejected = dict(signed.data, verified=False)

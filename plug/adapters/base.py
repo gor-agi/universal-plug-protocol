@@ -196,17 +196,35 @@ def allow_private_networks(allowed: bool = True) -> None:
     _FETCH_POLICY["allow_private"] = bool(allowed)
 
 
-_NAT64 = (ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("64:ff9b:1::/48"))
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")  # well-known prefix: the IPv4 host is the low 32 bits
+# Reachable only through a translator or not at all, though the ipaddress module may report them global.
+_NOT_PUBLIC = tuple(ipaddress.ip_network(n) for n in (
+    "64:ff9b:1::/48",     # local-use NAT64 (RFC 8215); operator-specific embedding
+    "::/96",              # IPv4-compatible (deprecated)
+    "::ffff:0:0:0/96",    # SIIT IPv4-translated
+    "5f00::/16",          # SRv6 SIDs (RFC 9602)
+))
+
+
+def is_public_address(address) -> bool:
+    """True for a unicast address on the public internet, judging embedded IPv4 hosts by themselves."""
+    address = ipaddress.ip_address(address)
+    target = address
+    if address.version == 6:
+        if address.ipv4_mapped is not None:
+            target = address.ipv4_mapped
+        elif address in _NAT64:
+            target = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        elif any(address in n for n in _NOT_PUBLIC):
+            return False
+    return target.is_global and not target.is_multicast and not any(
+        target in n for n in _NOT_PUBLIC if n.version == target.version)
 
 
 def _check_peer(sock) -> None:
     if _FETCH_POLICY["allow_private"]:
         return
-    address = ipaddress.ip_address(sock.getpeername()[0].split("%", 1)[0])
-    embedded = getattr(address, "ipv4_mapped", None)
-    if embedded is None and address.version == 6 and any(address in n for n in _NAT64):
-        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)  # the IPv4 host a NAT64 gateway reaches
-    if not (embedded if embedded is not None else address).is_global:
+    if not is_public_address(sock.getpeername()[0].split("%", 1)[0]):
         sock.close()
         raise PlugError("not_authorized", "remote document host is not a public address")
 

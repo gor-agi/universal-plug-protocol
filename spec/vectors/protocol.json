@@ -3787,6 +3787,52 @@
     "verification_method": "did:key:zDnaeUizbXb9XgUCGy2DkRAtMHbHYg66N1y8tbSFGA22k7HN9"
    },
    "valid": false
+  },
+  {
+   "case": "small-order key (identity) signs anything",
+   "attestation": {
+    "subject_hash": "716e7c7e65c1e29f7d43c2ff1b36efb924ca4dabb6a1f4b0a231d8db8950282e",
+    "hash_alg": "sha-256",
+    "fact_type": "control.halt",
+    "issuer": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj",
+    "issued_at": "2026-10-11T00:00:00Z",
+    "expires_at": null,
+    "role": null,
+    "meta": {
+     "actor": "did:plug:agents:a1",
+     "model_family": "family-a"
+    },
+    "disclosure": []
+   },
+   "proof": {
+    "alg": "ed25519",
+    "sig": "0x01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "verification_method": "did:key:z6MkeXATEjyXENzBXBxgC5EHk2JE5aqd7qMGGtDpLUH1e2Sj"
+   },
+   "valid": false
+  },
+  {
+   "case": "non-canonical did:key (uncompressed P-256 point)",
+   "attestation": {
+    "subject_hash": "716e7c7e65c1e29f7d43c2ff1b36efb924ca4dabb6a1f4b0a231d8db8950282e",
+    "hash_alg": "sha-256",
+    "fact_type": "control.halt",
+    "issuer": "did:key:z4oJ8b49LditYtzLk63B9CbKAerX6hBCtheaZFaey5YfxtTMxUhp5ytJDmozVkX1awgPSviG5waLyci1sQu9UyFkXYbvd",
+    "issued_at": "2026-10-11T00:00:00Z",
+    "expires_at": null,
+    "role": null,
+    "meta": {
+     "actor": "did:plug:agents:a1",
+     "model_family": "family-a"
+    },
+    "disclosure": []
+   },
+   "proof": {
+    "alg": "ecdsa-p256",
+    "sig": "0xede2eda0666061caa04f656092e89a4fbc45ca56793f323bbc2804607d0afc73a94019e90d412bd25c4e4de02e1157d4e59e88431c0d4ab0aa54386517ea0003",
+    "verification_method": "did:key:z4oJ8b49LditYtzLk63B9CbKAerX6hBCtheaZFaey5YfxtTMxUhp5ytJDmozVkX1awgPSviG5waLyci1sQu9UyFkXYbvd"
+   },
+   "valid": false
   }
  ],
  "reserved": [

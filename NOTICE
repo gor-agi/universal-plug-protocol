@@ -8,6 +8,15 @@ Version 2.0 (see LICENSE).
 Optional third-party components used at runtime, not distributed with this
 product:
   - gmssl (BSD) for SM2 curve arithmetic
-  - pycryptodome (BSD, Public Domain) for Ed25519 and P-256
+  - cryptography (Apache-2.0 OR BSD-3-Clause) for Ed25519 and P-256
   - web3, eth-account, eth-keys (MIT) for the Ethereum adapter
   - chainmaker (Apache-2.0) for the ChainMaker adapter
+
+Test vectors distributed in spec/vectors/ (see spec/vectors/README.md):
+  - wycheproof/: Project Wycheproof (C2SP/wycheproof), Apache-2.0,
+    Copyright Google LLC and the Wycheproof authors
+  - jcs-cyberphone/: cyberphone/json-canonicalization, Apache-2.0,
+    Copyright 2018 Anders Rundgren
+  - rfc9162.json: transparency-dev/merkle, Apache-2.0, Copyright Google LLC
+  - status-list-draft21.json: draft-ietf-oauth-status-list-21, Appendix C
+    (IETF Trust; code components under the Revised BSD License)

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-pytest.importorskip("Crypto")
+pytest.importorskip("cryptography")
 
 from plug import suites
 from plug.adapters.oracle import OracleAdapter

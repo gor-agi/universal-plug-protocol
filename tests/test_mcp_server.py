@@ -161,3 +161,61 @@ def test_unexpected_failures_return_a_generic_error():
             out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
             assert out == {"error": "operation failed", "retryable": False}
     run(go())
+
+
+def test_receipts_returned_to_the_model_carry_no_registry_url_or_host():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from plug.mcp_server import _redact
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            raw = json.dumps({"issuers": [self.server.issuer]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    p = Plug()
+    p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
+    p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+    httpd.issuer = p.active().credential_subject
+    secret_url = f"http://127.0.0.1:{httpd.server_port}/partners.json?token=s3cr3t"
+
+    async def go():
+        async with Client(build_server(p, registries={"partners": secret_url})) as client:
+            att = (await call(client, "prove", fact="x", fact_type="doc.sha256"))["attestation"]
+            out = await call(client, "check", attestation=att, trust_registry="partners")
+            assert out["valid"] is True, out
+            text = json.dumps(out)
+            assert "s3cr3t" not in text and "127.0.0.1" not in text
+    try:
+        run(go())
+    finally:
+        httpd.shutdown()
+    assert "10.0.0.5" not in _redact("unavailable: failed to connect to all addresses; ipv4:10.0.0.5:12301")
+    assert "10.0.0.5" not in _redact("connect to 10.0.0.5:12301 refused")
+
+
+def test_batch_and_fact_size_limits():
+    p = Plug()
+    p.register_adapter("sepolia", LiveAdapter(w3=_FakeW3()))
+    p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
+
+    async def go():
+        async with Client(build_server(p, max_batch=3, max_fact_bytes=16)) as client:
+            for name, args, error in (
+                    ("prove_batch", {"facts": ["a"] * 4, "fact_type": "doc.sha256"}, "at most 3 facts"),
+                    ("prove", {"fact": "x" * 17, "fact_type": "doc.sha256"}, "at most 16 bytes"),
+                    ("prove", {"fact": 2 ** 60, "fact_type": "doc.sha256"}, "not I-JSON")):
+                r = await client.call_tool(name, args)
+                out = r.structured_content if r.structured_content is not None else json.loads(r.content[0].text)
+                assert error in out["error"] and out["retryable"] is False, out
+            assert (await call(client, "prove_batch", facts=["a"] * 3, fact_type="doc.sha256"))["status"] == "ok"
+    run(go())
+

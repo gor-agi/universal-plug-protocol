@@ -12,8 +12,8 @@ Every suite signs the same message, the 32-byte subject hash, applying its own s
 - sm2-sm3          SM2 with SM3 and the default distinguishing ID 1234567812345678
                    (GB/T 32918.2, GM/T 0009). sig is r||s. verification_method: did:key.
 
-Each suite needs its optional library: eth-account (secp256k1), pycryptodome
-(ed25519, P-256), gmssl (SM2 curve arithmetic). A missing library raises
+Each suite needs its optional library: eth-account (secp256k1), cryptography
+(ed25519, P-256; OpenSSL-backed), gmssl (SM2 curve arithmetic). A missing library raises
 unsupported_op; nothing is emulated.
 """
 from __future__ import annotations
@@ -70,8 +70,15 @@ def did_key(alg: str, public_key: bytes) -> str:
     return "did:key:z" + _b58encode(_varint(_MULTICODEC[alg]) + public_key)
 
 
+_KEY_LENGTH = {"ed25519": 32, "ecdsa-p256": 33, "sm2-sm3": 33}
+
+
 def parse_did_key(did: str) -> tuple[str, bytes]:
-    """Return (suite, public key bytes) for a did:key, ignoring any #fragment."""
+    """Return (suite, public key bytes) for a did:key, ignoring any #fragment.
+
+    Only the canonical form is accepted: a raw 32-byte Ed25519 key or a 33-byte compressed SEC1 point,
+    encoded so that re-encoding yields the same identifier. One key therefore has exactly one did:key.
+    """
     base = (did or "").split("#", 1)[0]
     if not base.startswith("did:key:z"):
         raise ValueError("not a did:key")
@@ -79,7 +86,13 @@ def parse_did_key(did: str) -> tuple[str, bytes]:
     for alg, code in _MULTICODEC.items():
         prefix = _varint(code)
         if raw.startswith(prefix):
-            return alg, raw[len(prefix):]
+            public = raw[len(prefix):]
+            if len(public) != _KEY_LENGTH[alg] or (alg != "ed25519" and public[0] not in (2, 3)):
+                raise ValueError(f"{alg} did:key must carry a {_KEY_LENGTH[alg]}-byte "
+                                 + ("raw key" if alg == "ed25519" else "compressed point"))
+            if did_key(alg, public) != base:
+                raise ValueError("did:key is not canonically encoded")
+            return alg, public
     raise ValueError("unsupported did:key multicodec")
 
 
@@ -123,42 +136,88 @@ def _k1_verify(msg: bytes, sig: bytes, method: str) -> tuple[bool, str]:
     return recovered == expected, recovered
 
 
-# ---- Ed25519 and P-256 (pycryptodome) ----
+# ---- Ed25519 and P-256 (pyca/cryptography, OpenSSL-backed) ----
+
+def _ec():
+    hazmat = _require("cryptography.hazmat.primitives.asymmetric.ec", "ecdsa-p256")
+    return hazmat, _require("cryptography.hazmat.primitives.hashes", "ecdsa-p256")
+
 
 def _ed_sign(key: str, msg: bytes) -> tuple[bytes, bytes]:
-    ECC = _require("Crypto.PublicKey.ECC", "ed25519")
-    eddsa = _require("Crypto.Signature.eddsa", "ed25519")
-    k = ECC.construct(curve="ed25519", seed=bytes.fromhex(key.removeprefix("0x")))
-    return eddsa.new(k, "rfc8032").sign(msg), k.public_key().export_key(format="raw")
+    ed = _require("cryptography.hazmat.primitives.asymmetric.ed25519", "ed25519")
+    ser = _require("cryptography.hazmat.primitives.serialization", "ed25519")
+    k = ed.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key.removeprefix("0x")))
+    return k.sign(msg), k.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw)
+
+
+_ED_P = 2**255 - 19
+_ED_D = -121665 * pow(121666, -1, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)  # sqrt(-1)
+
+
+def _ed_small_order_or_invalid(public: bytes) -> bool:
+    """True unless `public` canonically encodes an Ed25519 point outside the small-order subgroup (RFC 8032 5.1.3)."""
+    if len(public) != 32:
+        return True
+    y = int.from_bytes(public, "little") & ((1 << 255) - 1)
+    sign = public[31] >> 7
+    if y >= _ED_P:
+        return True
+    u, v = (y * y - 1) % _ED_P, (_ED_D * y * y + 1) % _ED_P
+    x = (u * pow(v, 3, _ED_P) * pow(u * pow(v, 7, _ED_P), (_ED_P - 5) // 8, _ED_P)) % _ED_P
+    if (v * x * x - u) % _ED_P:
+        x = x * _ED_I % _ED_P
+        if (v * x * x - u) % _ED_P:
+            return True
+    if x == 0 and sign:
+        return True
+    if x & 1 != sign:
+        x = _ED_P - x
+    X, Y, Z = x, y, 1
+    for _ in range(3):  # [8]P in extended coordinates (dbl-2008-hwcd)
+        A, B, C = X * X % _ED_P, Y * Y % _ED_P, 2 * Z * Z % _ED_P
+        H = (A + B) % _ED_P
+        E = (H - (X + Y) * (X + Y)) % _ED_P
+        G = (A - B) % _ED_P
+        F = (C + G) % _ED_P
+        X, Y, Z = E * F % _ED_P, G * H % _ED_P, F * G % _ED_P
+    return X % _ED_P == 0 and (Y - Z) % _ED_P == 0
 
 
 def _ed_verify(msg: bytes, sig: bytes, public: bytes) -> bool:
-    eddsa = _require("Crypto.Signature.eddsa", "ed25519")
+    ed = _require("cryptography.hazmat.primitives.asymmetric.ed25519", "ed25519")
+    exceptions = _require("cryptography.exceptions", "ed25519")
+    if _ed_small_order_or_invalid(public):
+        return False
     try:
-        eddsa.new(eddsa.import_public_key(public), "rfc8032").verify(msg, sig)
+        ed.Ed25519PublicKey.from_public_bytes(public).verify(sig, msg)
         return True
-    except ValueError:
+    except (ValueError, exceptions.InvalidSignature):
         return False
 
 
 def _p256_sign(key: str, msg: bytes) -> tuple[bytes, bytes]:
-    ECC = _require("Crypto.PublicKey.ECC", "ecdsa-p256")
-    DSS = _require("Crypto.Signature.DSS", "ecdsa-p256")
-    SHA256 = _require("Crypto.Hash.SHA256", "ecdsa-p256")
-    k = ECC.construct(curve="P-256", d=int(key.removeprefix("0x"), 16))
-    sig = DSS.new(k, "deterministic-rfc6979", encoding="binary").sign(SHA256.new(msg))
-    return sig, k.public_key().export_key(format="SEC1", compress=True)
+    ec, hashes = _ec()
+    ser = _require("cryptography.hazmat.primitives.serialization", "ecdsa-p256")
+    utils = _require("cryptography.hazmat.primitives.asymmetric.utils", "ecdsa-p256")
+    k = ec.derive_private_key(int(key.removeprefix("0x"), 16), ec.SECP256R1())
+    r, s = utils.decode_dss_signature(k.sign(msg, ec.ECDSA(hashes.SHA256(), deterministic_signing=True)))
+    public = k.public_key().public_bytes(ser.Encoding.X962, ser.PublicFormat.CompressedPoint)
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big"), public
 
 
 def _p256_verify(msg: bytes, sig: bytes, public: bytes) -> bool:
-    ECC = _require("Crypto.PublicKey.ECC", "ecdsa-p256")
-    DSS = _require("Crypto.Signature.DSS", "ecdsa-p256")
-    SHA256 = _require("Crypto.Hash.SHA256", "ecdsa-p256")
+    ec, hashes = _ec()
+    utils = _require("cryptography.hazmat.primitives.asymmetric.utils", "ecdsa-p256")
+    exceptions = _require("cryptography.exceptions", "ecdsa-p256")
+    if len(sig) != 64 or len(public) != 33 or public[0] not in (2, 3):
+        return False
     try:
-        pub = ECC.import_key(public, curve_name="P-256")
-        DSS.new(pub, "fips-186-3", encoding="binary").verify(SHA256.new(msg), sig)
+        pub = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public)  # validates the point
+        der = utils.encode_dss_signature(int.from_bytes(sig[:32], "big"), int.from_bytes(sig[32:], "big"))
+        pub.verify(der, msg, ec.ECDSA(hashes.SHA256()))
         return True
-    except ValueError:
+    except (ValueError, exceptions.InvalidSignature):
         return False
 
 
@@ -191,6 +250,8 @@ def _sm2_decompress(point: bytes) -> str:
     if len(point) != 33 or point[0] not in (2, 3):
         raise ValueError("SM2 key must be a compressed SEC1 point")
     x = int.from_bytes(point[1:], "big")
+    if x >= p:
+        raise ValueError("SM2 point x is not a field element")
     rhs = (pow(x, 3, p) + a * x + b) % p
     y = pow(rhs, (p + 1) // 4, p)
     if y * y % p != rhs:
@@ -240,7 +301,8 @@ def generate_key(alg: str) -> str:
     if alg == "ed25519":
         return secrets.token_bytes(32).hex()
     if alg == "ecdsa-p256":
-        return f"{int(_require('Crypto.PublicKey.ECC', alg).generate(curve='P-256').d):064x}"
+        ec, _ = _ec()
+        return f"{ec.generate_private_key(ec.SECP256R1()).private_numbers().private_value:064x}"
     if alg == "sm2-sm3":
         _, n, *_ = _sm2()
         return f"{secrets.randbelow(n - 2) + 1:064x}"

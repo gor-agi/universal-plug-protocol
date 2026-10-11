@@ -8,7 +8,7 @@ A network-agnostic Python core for attestations and identity. Callers use prove,
 - `plug.suites` — signature suites: ecdsa-secp256k1, ed25519, ecdsa-p256, sm2-sm3. Issuer binding for `did:key`, `did:plug`, and `did:pkh`.
 - `plug.adapters.StubAdapter` — in-memory adapter. The test suite uses it. It does not check signatures, and it rejects proofs it cannot check.
 - `plug.adapters.OracleAdapter` — observation-to-attest backend with freshness, jump-bound, and issuer checks.
-- `plug.adapters.EudiAdapter` — EU digital identity wallet profile: trusted lists that supply issuers and their keys, and IETF Token Status Lists. A credential that names a status list in `meta.status.status_list {idx, uri}` verifies only while its status is VALID; the Status List Token must be a `statuslist+jwt` signed (ES256 or EdDSA) by a key of the issuer. An unreachable list with no unexpired cached copy fails closed.
+- `plug.adapters.EudiAdapter` — EU digital identity wallet profile: trusted lists that supply issuers and their keys, and IETF Token Status Lists. A credential that names a status list in `meta.status.status_list {idx, uri}` verifies only while its status is VALID; the Status List Token must be a `statuslist+jwt` signed (ES256 or EdDSA) by a key of the issuer. An unreachable list with no unexpired cached copy fails closed. Trusted lists here are JSON registries, not signed ETSI trusted lists, and SD-JWT VC and mdoc credentials are gated by format name, not verified (see [docs/threat-model.md](docs/threat-model.md)).
 - `plug.adapters.ChainMakerAdapter` — permissioned ledger with certificate-based membership (ChainMaker v3). Anchors statement hashes through a one-opcode EVM contract; verification binds the issuer to the member's P-256 key and reports the member organization and finality.
 - `plug.adapters.LiveAdapter` — Ethereum-family adapter (Sepolia by default). Install the `live` extra. Set `SEPOLIA_RPC_URL`; a session brings its key as raw auth material, and `SEPOLIA_PRIVATE_KEY` is the optional default. Attest signs the attestation's statement hash (subject hash, type, issuer, times, role, and meta), records it on-chain, and sets the attestation's `anchor`. Verify passes only when the signature, the issuer DID, and the on-chain anchor all name the same key and carry the same hash; it reports `anchored_at` and finality.
 - `plug.mcp_server` — Model Context Protocol transport: prove, prove_batch, check, watch, networks. Keys stay server-side; the server, not the model, decides which fact types it proves and sets the model identity. Run `python -m plug.mcp_server --config plug-mcp.json` (install the `mcp` extra).
@@ -55,7 +55,8 @@ An explicit network is required when there is no open session. Prove hashes `byt
 
 - [SPEC.md](SPEC.md) — operations, payload schemas, canonical form, signature suites, the error model, session rules, the idempotency invariant, and bridge verification.
 - [spec/did-plug.md](spec/did-plug.md) — the `did:plug` method.
-- [spec/vectors/](spec/vectors/) — language-neutral conformance vectors, with an independent Node verifier for commitments, batch inclusion proofs, and Ed25519 and P-256 proofs.
+- [spec/vectors/](spec/vectors/) — language-neutral conformance vectors, with an independent Node verifier for commitments, batch inclusion proofs, and Ed25519 and P-256 proofs, plus third-party vectors (Wycheproof, RFC 8785 reference data, the status list draft).
+- [docs/threat-model.md](docs/threat-model.md) — security goals, per-component problem definitions, and the decisions taken on each.
 
 ## Project
 

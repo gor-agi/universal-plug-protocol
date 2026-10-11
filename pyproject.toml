@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plug"
-version = "0.3.1"
+version = "0.3.2"
 description = "Network-agnostic layer for attestations and identity across public, permissioned, enterprise, and sovereign networks."
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
@@ -19,9 +19,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "coverage>=7"]
+dev = ["pytest>=8", "coverage>=7", "rfc8785>=0.1.4"]
 live = ["web3>=7.0", "eth-account>=0.13", "eth-keys>=0.5"]
-suites = ["pycryptodome>=3.20", "gmssl>=3.2.2"]
+suites = ["cryptography>=43", "gmssl>=3.2.2"]
 mcp = ["mcp>=2.3"]
 
 [tool.hatch.build.targets.wheel]

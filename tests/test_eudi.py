@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-pytest.importorskip("Crypto")
+pytest.importorskip("cryptography")
 
 from plug import suites
 from plug.adapters.eudi import EudiAdapter, decode_status_list, status_at
@@ -230,10 +230,15 @@ def test_trusted_lists_supply_issuers_and_keys(server):
     v = p.check(outsider.credential(p, "x", 0, None), network=NET)
     assert v["receipt"].error == "not_authorized: issuer not in trust registry"
 
-    hits = dict(server.hits)
     explicit = {"issuers": [outsider.did]}
-    assert p.check(outsider.credential(p, "y", 0, None), network=NET, trust_registry=explicit)["valid"] is True
-    assert server.hits == hits, "an explicit registry replaces the trusted lists"
+    v = p.check(outsider.credential(p, "y", 0, None), network=NET, trust_registry=explicit)
+    assert v["receipt"].error == "not_authorized: issuer not in trust registry", "a caller cannot widen operator trust"
+    narrowed = p.check(provider.credential(p, "pid-n", 0, uri, issuer=did_web), network=NET,
+                       trust_registry={"issuers": ["did:web:someone-else.example"]})
+    assert narrowed["receipt"].error == "not_authorized: issuer not in trust registry", "but it can narrow it"
+    both = p.check(provider.credential(p, "pid-b", 0, uri, issuer=did_web), network=NET,
+                   trust_registry={"issuers": [did_web]})
+    assert both["valid"] is True, both["receipt"].error
 
     down = plug(trusted_lists=[server.url("/tl/a.json"), server.url("/tl/missing.json")])
     v = down.check(provider.credential(down, "z", 0, uri, issuer=did_web), network=NET)
@@ -309,6 +314,10 @@ def test_an_older_status_list_token_cannot_roll_back_a_revocation(server):
     ("8.8.8.8", True), ("2001:4860:4860::8888", True), ("::ffff:8.8.8.8", True), ("64:ff9b::808:808", True),
     ("127.0.0.1", False), ("10.0.0.5", False), ("169.254.169.254", False), ("::1", False), ("fe80::1%en0", False),
     ("::ffff:10.0.0.1", False), ("64:ff9b::a00:5", False), ("64:ff9b::a9fe:a9fe", False), ("64:ff9b:1::a00:5", False),
+    ("2002:a00:1::1", False), ("2001:0:4136:e378:8000:63bf:f5ff:fffe", False), ("100.64.0.1", False),
+    ("198.18.0.1", False), ("192.0.0.1", False), ("3fff::1", False), ("5f00::1", False), ("0.0.0.0", False),
+    ("255.255.255.255", False), ("224.0.0.1", False), ("ff02::1", False), ("ff0e::1", False),
+    ("::a00:1", False), ("::808:808", False), ("::ffff:0:a00:1", False), ("64:ff9b:1::808:808", False),
 ])
 def test_peer_address_guard(peer, allowed):
     from plug.adapters import base
@@ -347,3 +356,20 @@ def test_environment_proxies_are_not_used(server, monkeypatch):
         assert proxy.hits == {} and server.hits["/direct"] == 1
     finally:
         proxy.httpd.shutdown()
+
+
+def test_old_status_list_tokens_are_refused_by_their_signed_iat(server):
+    issuer = Issuer()
+    year_ago = int(time.time()) - 365 * 86400
+    p = plug(status_list_poll=1, status_list_max_stale=1)
+    cases = {
+        "/sl/ancient": ({"iat": year_ago, "ttl": 60}, "proof_invalid: status list token is too old"),
+        "/sl/ancient-no-ttl": ({"iat": year_ago, "ttl": None}, "proof_invalid: status list token is too old"),
+        "/sl/future": ({"iat": int(time.time()) + 3600}, "proof_invalid: status list token iat is in the future"),
+        "/sl/recent": ({"iat": int(time.time()) - 30, "ttl": 60}, None),
+    }
+    for path, (claims, error) in cases.items():
+        uri = publish(server, issuer, path, [0], claims=claims)
+        v = p.check(issuer.credential(p, path, 0, uri), network=NET)
+        assert v["receipt"].error == error, path
+

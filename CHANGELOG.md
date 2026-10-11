@@ -2,6 +2,30 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.3.2
+
+### Security
+
+From an audit against the new threat model ([docs/threat-model.md](docs/threat-model.md)):
+
+- **Ed25519 small-order keys.** The identity key "signed" every message, and OpenSSL accepts such forgeries. Keys that are not canonical points or lie in the small-order subgroup are rejected, here and in the Node verifier.
+- **One key, one did:key.** P-256 keys were accepted uncompressed or as DER, so one key had several identifiers. Only the canonical form (32-byte Ed25519, 33-byte compressed point, re-encoding to the same string) is accepted.
+- **Status list freshness is judged from the signed `iat`**, so an old pre-revocation token without `exp` is refused however recently it was fetched; future `iat` is refused.
+- **Registry URLs reached the model** in MCP receipts. Receipts are now redacted of URLs, gRPC targets, and host addresses throughout.
+- **Operator trusted lists are no longer replaced** by a caller's registry; a caller can only narrow them.
+- **Unsigned batch labels.** A batch member carrying its own `batch_size` or `batch_fact_type` is rejected.
+- **Scalar facts** (`true`, `null`, numbers) are hashed as RFC 8785, not Python `str()`; facts of other types are refused, and integers beyond 2^53 are refused instead of hashed.
+- **Address guard** also refuses multicast, local-use NAT64, IPv4-compatible, SIIT, and SRv6 ranges. MCP calls are bounded in batch size and fact size.
+
+### Changed
+
+- Ed25519 and P-256 use **pyca/cryptography** (OpenSSL-backed) instead of pycryptodome; signatures are byte-identical (deterministic), and the `suites` extra now requires `cryptography>=43`.
+
+### Added
+
+- `docs/threat-model.md`: security goals, problem definitions P1–P13, and the decision on each after surveying existing solutions.
+- Third-party vectors in `spec/vectors/` (see its README): Wycheproof P-256 and Ed25519, the RFC 8785 reference data, and the status list draft's Appendix C; Trail of Bits `rfc8785` as a test oracle (`dev` extra).
+
 ## 0.3.1
 
 ### Fixed

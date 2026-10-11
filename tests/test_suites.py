@@ -11,7 +11,7 @@ import pytest
 from plug import suites
 from plug.core import PlugError, sha256_hex
 
-pytest.importorskip("Crypto")
+pytest.importorskip("cryptography")
 
 SUBJECT = sha256_hex(b"bill of lading 2026-0042")
 
@@ -43,7 +43,7 @@ def test_sign_verify_and_tamper(alg):
 
 def test_did_key_prefixes_match_multicodec_registry():
     if not available("ed25519"):
-        pytest.skip("pycryptodome missing")
+        pytest.skip("cryptography missing")
     ed = suites.sign("ed25519", suites.generate_key("ed25519"), SUBJECT)["verification_method"]
     p256 = suites.sign("ecdsa-p256", suites.generate_key("ecdsa-p256"), SUBJECT)["verification_method"]
     assert ed.startswith("did:key:z6Mk") and p256.startswith("did:key:zDn")
@@ -53,7 +53,7 @@ def test_did_key_prefixes_match_multicodec_registry():
 
 def test_key_type_must_match_alg():
     if not available("ed25519"):
-        pytest.skip("pycryptodome missing")
+        pytest.skip("cryptography missing")
     proof = suites.sign("ed25519", suites.generate_key("ed25519"), SUBJECT)
     ok, reason = suites.verify(SUBJECT, dict(proof, alg="ecdsa-p256"))
     assert not ok and "does not match alg" in reason
@@ -150,14 +150,14 @@ def _key_fields(pem):
 
 
 def _der_to_raw(der):
-    from Crypto.Util.asn1 import DerSequence
-    seq = DerSequence().decode(der)
-    return seq[0].to_bytes(32, "big") + seq[1].to_bytes(32, "big")
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    r, s = decode_dss_signature(der)
+    return r.to_bytes(32, "big") + s.to_bytes(32, "big")
 
 
 def _raw_to_der(raw):
-    from Crypto.Util.asn1 import DerSequence
-    return DerSequence([int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big")]).encode()
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    return encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
 
 
 def _compressed(pub):
@@ -195,3 +195,53 @@ def test_interop_with_openssl(alg):
         out = _run("pkeyutl", "-verify", "-pubin", "-inkey", pub_pem, "-rawin", *DIGEST[alg],
                    "-in", msg, "-sigfile", sig, text=True)
         assert "Signature Verified Successfully" in out.stdout
+
+
+ED25519_SMALL_ORDER = [  # libsodium's blocklist of small-order encodings, with and without the sign bit
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+]
+
+
+def test_ed25519_small_order_and_noncanonical_keys_never_verify():
+    if not available("ed25519"):
+        pytest.skip("cryptography missing")
+    for key in ED25519_SMALL_ORDER:
+        assert suites._ed_small_order_or_invalid(bytes.fromhex(key)), key
+    assert suites._ed_small_order_or_invalid(bytes.fromhex("ed" + "ff" * 30 + "7f")), "y >= p is not canonical"
+    identity = bytes.fromhex(ED25519_SMALL_ORDER[1])
+    forged = {"alg": "ed25519", "sig": "0x" + (identity + bytes(32)).hex(),
+              "verification_method": suites.did_key("ed25519", identity)}
+    assert suites.verify(SUBJECT, forged)[0] is False, "the identity key must not sign everything"
+    for _ in range(20):
+        did = suites.sign("ed25519", suites.generate_key("ed25519"), SUBJECT)["verification_method"]
+        assert not suites._ed_small_order_or_invalid(suites.parse_did_key(did)[1])
+
+
+def test_one_key_has_exactly_one_did_key():
+    if not available("ecdsa-p256"):
+        pytest.skip("cryptography missing")
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = suites.generate_key("ecdsa-p256")
+    proof = suites.sign("ecdsa-p256", key, SUBJECT)
+    public = ec.derive_private_key(int(key, 16), ec.SECP256R1()).public_key()
+    aliases = [public.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint),
+               public.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)]
+    for alias in aliases:
+        did = "did:key:z" + suites._b58encode(suites._varint(0x1200) + alias)
+        with pytest.raises(ValueError):
+            suites.parse_did_key(did)
+        assert suites.verify(SUBJECT, dict(proof, verification_method=did))[0] is False
+    canonical = proof["verification_method"]
+    raw = suites._b58decode(canonical[len("did:key:z"):])
+    with pytest.raises(ValueError):
+        suites.parse_did_key("did:key:z1" + suites._b58encode(raw))  # leading zero byte: another spelling
+    assert suites.verify(SUBJECT, proof)[0] is True
+

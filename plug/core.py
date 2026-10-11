@@ -250,12 +250,17 @@ def parse_time(value: str) -> datetime:
 
 
 def fact_bytes(fact: Any) -> bytes:
-    """The bytes a fact is hashed as: RFC 8785 for dicts and lists, raw bytes, else UTF-8 text."""
-    if isinstance(fact, (dict, list)):
-        return canonical(fact).encode("utf-8")
+    """The bytes a fact is hashed as: raw bytes as-is, text as UTF-8, any other JSON value as RFC 8785."""
     if isinstance(fact, (bytes, bytearray)):
         return bytes(fact)
-    return str(fact).encode("utf-8")
+    if isinstance(fact, str):
+        return fact.encode("utf-8")
+    if fact is None or isinstance(fact, (bool, int, float, list, tuple, dict)):
+        try:
+            return canonical(fact).encode("utf-8")
+        except (ValueError, TypeError, RecursionError) as e:
+            raise PlugError("unsupported_op", f"fact is not I-JSON: {e}") from e
+    raise PlugError("unsupported_op", f"a fact is bytes, text, or a JSON value, not {type(fact).__name__}")
 
 
 def commitment(fact: Any, salt: str, hash_alg: str = "sha-256") -> str:
@@ -607,6 +612,10 @@ class Plug:
         root, err = _inclusion_root(att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
+        if {"batch_size", "batch_fact_type"} & set(att.meta):
+            # The verifier derives these for the batch statement; a member that carries its own is unsigned.
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
+                           error="proof_invalid: batch member meta may not carry batch_size or batch_fact_type")
         size = int(att.inclusion["size"])
         anchored = batch_commitment(root, size, att.hash_alg)
         # The signed batch statement: same issuer, time, and meta, typed plug.batch, naming the member type.

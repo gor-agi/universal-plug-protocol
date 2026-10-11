@@ -9,7 +9,7 @@ import time
 import pytest
 
 pytest.importorskip("chainmaker")
-pytest.importorskip("Crypto")
+pytest.importorskip("cryptography")
 
 from plug import suites
 from plug.adapters.chainmaker import ChainMakerAdapter, anchor_calldata

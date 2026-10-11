@@ -28,8 +28,8 @@ _TX_PREFIX = "cm:"
 
 
 def _keccak(data: bytes) -> bytes:
-    from Crypto.Hash import keccak
-    return keccak.new(data=data, digest_bits=256).digest()
+    import sha3  # safe-pysha3, which the ChainMaker SDK requires
+    return sha3.keccak_256(data).digest()
 
 
 def anchor_selector() -> str:
@@ -43,9 +43,9 @@ def anchor_calldata(subject_hash: str) -> str:
 
 def account_from_public_key(compressed: bytes) -> str:
     """Account under ChainMaker's ETHEREUM address type: last 20 bytes of keccak256(x || y)."""
-    from Crypto.PublicKey import ECC
-    point = ECC.import_key(compressed, curve_name="P-256").pointQ
-    xy = int(point.x).to_bytes(32, "big") + int(point.y).to_bytes(32, "big")
+    from cryptography.hazmat.primitives.asymmetric import ec
+    numbers = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), compressed).public_numbers()
+    xy = numbers.x.to_bytes(32, "big") + numbers.y.to_bytes(32, "big")
     return "0x" + _keccak(xy)[-20:].hex()
 
 

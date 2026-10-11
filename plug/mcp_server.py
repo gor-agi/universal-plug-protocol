@@ -16,7 +16,7 @@ import os
 import re
 from typing import Any, Optional
 
-from .core import Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type
+from .core import Attestation, Plug, PlugError, Receipt, StateRef, canon_fact_type, fact_bytes
 
 # Fact types the model may not have the server sign unless the operator allowlists them: oversight evidence
 # about the model itself, and plug.* commitments, which only the plug produces (never allowlistable).
@@ -29,7 +29,9 @@ def _ref_json(ref: Optional[StateRef]) -> Optional[dict]:
 
 
 _LOG = logging.getLogger("plug.mcp_server")
-_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+"  # URLs, credentials and tokens included
+                  r"|\bipv[46]:[^\s'\",]+"                    # gRPC targets such as ipv4:10.0.0.5:12301
+                  r"|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b")      # bare IPv4 addresses and ports
 # Meta keys an adapter dereferences (fetches). Only the operator may set them, never the model.
 _OPERATOR_META = ("status",)
 
@@ -39,9 +41,21 @@ def _redact(text: Optional[str]) -> Optional[str]:
     return _URL.sub("<url>", text) if text else text
 
 
+def _redact_all(value):
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_all(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_all(v) for v in value]
+    return value
+
+
 def receipt_json(r: Receipt) -> dict:
+    """A receipt for the model: registry URLs, endpoints, and hosts anywhere in it are redacted."""
     return {"spec_version": r.spec_version, "op": r.op, "status": r.status.value, "network": r.network,
-            "state_ref": _ref_json(r.state_ref), "data": r.data, "error": _redact(r.error), "seq": r.seq}
+            "state_ref": _ref_json(r.state_ref), "data": _redact_all(r.data), "error": _redact(r.error),
+            "seq": r.seq}
 
 
 def attestation_json(r: Receipt) -> dict:
@@ -66,12 +80,13 @@ def attestation_from_json(d: dict) -> Attestation:
 
 
 def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: str = "universal-plug",
-                 fact_types: Optional[list[str]] = None, model: Optional[dict] = None):
+                 fact_types: Optional[list[str]] = None, model: Optional[dict] = None,
+                 max_batch: int = 1000, max_fact_bytes: int = 1 << 20):
     """An MCP server over an already configured Plug. registries: allowlisted name -> registry URL.
 
     fact_types: allowlist of fact types the model may prove; None allows any type outside
     RESERVED_FACT_TYPES. model: {"model_family", "model_id"} the server stamps into meta, replacing
-    whatever the model sends.
+    whatever the model sends. max_batch and max_fact_bytes bound what one call may ask the server to hash and sign.
     """
     from mcp.server.mcpserver import MCPServer
 
@@ -98,6 +113,11 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
             raise PlugError("not_authorized", f"fact type {ft} is not allowed by this server")
         return ft
 
+    def bounded(fact: Any) -> Any:
+        if len(fact_bytes(fact)) > max_fact_bytes:
+            raise PlugError("unsupported_op", f"a fact is at most {max_fact_bytes} bytes")
+        return fact
+
     def server_meta(meta: Optional[dict]) -> dict:
         refused = [k for k in (meta or {}) if k in _OPERATOR_META]
         if refused:
@@ -118,14 +138,16 @@ def build_server(plug: Plug, registries: Optional[dict[str, str]] = None, name: 
     @server.tool(description="Record a fact. Returns the receipt and an attestation to pass to check.")
     def prove(fact: Any, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> dict:
         def run():
-            r = plug.prove(fact, admit(fact_type), network, server_meta(meta))
+            r = plug.prove(bounded(fact), admit(fact_type), network, server_meta(meta))
             return {"receipt": receipt_json(r), "attestation": attestation_json(r), "salt": r.data.get("salt")}
         return guarded(run)
 
     @server.tool(description="Record many facts under one anchor. Returns one attestation per fact.")
     def prove_batch(facts: list, fact_type: str, network: Optional[str] = None, meta: Optional[dict] = None) -> dict:
         def run():
-            rs = plug.prove_batch(facts, admit(fact_type), network, server_meta(meta))
+            if not isinstance(facts, list) or len(facts) > max_batch:
+                raise PlugError("unsupported_op", f"a batch holds at most {max_batch} facts")
+            rs = plug.prove_batch([bounded(f) for f in facts], admit(fact_type), network, server_meta(meta))
             return {"anchor": _ref_json(rs[0].state_ref), "status": rs[0].status.value,
                     "attestations": [attestation_json(r) for r in rs],
                     "salts": [r.data.get("salt") for r in rs]}

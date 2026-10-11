@@ -179,3 +179,14 @@ def test_receipts_do_not_share_signed_meta_with_the_caller_or_the_cache():
     assert retry.state_ref == first.state_ref
     assert p.check(Attestation.from_receipt(retry))["valid"] is True
 
+
+def test_batch_member_cannot_add_unsigned_batch_labels():
+    p = _ledger_plug()
+    r = p.prove_batch(["a", "b", "c"], "doc.sha256", meta={"note": "n"})[1]
+    assert p.check(Attestation.from_receipt(r))["valid"] is True
+    for extra in ({"batch_fact_type": "agent.action"}, {"batch_size": 999}):
+        att = Attestation.from_receipt(r)
+        att.meta.update(extra)
+        v = p.check(att)
+        assert v["valid"] is False and "batch member meta" in v["receipt"].error, extra
+

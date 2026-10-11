@@ -157,6 +157,25 @@ def _proofs() -> list:
             ok, detail = suites.verify(statement_hash(att), pr)
             out.append({"case": case, "attestation": _att_json(att), "proof": pr,
                         "valid": bool(ok and suites.binds(att.issuer, detail))})
+    # Key validation: OpenSSL accepts this Ed25519 forgery, so every implementation must reject the key itself.
+    identity = bytes.fromhex("01" + "00" * 31)
+    small = replace(base, issuer=suites.did_key("ed25519", identity))
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    point = ec.derive_private_key(int(keys["ecdsa-p256"], 16), ec.SECP256R1()).public_key().public_bytes(
+        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    alias = "did:key:z" + suites._b58encode(suites._varint(0x1200) + point)
+    uncompressed = replace(base, issuer=alias)
+    extra = [
+        ("small-order key (identity) signs anything", small,
+         {"alg": "ed25519", "sig": "0x" + (identity + bytes(32)).hex(), "verification_method": small.issuer}),
+        ("non-canonical did:key (uncompressed P-256 point)", uncompressed,
+         dict(suites.sign("ecdsa-p256", keys["ecdsa-p256"], statement_hash(uncompressed)), verification_method=alias)),
+    ]
+    for case, att, pr in extra:
+        ok, detail = suites.verify(statement_hash(att), pr)
+        assert not ok, case
+        out.append({"case": case, "attestation": _att_json(att), "proof": pr, "valid": False})
     return out
 
 

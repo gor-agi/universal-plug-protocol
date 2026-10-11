@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-pytest.importorskip("Crypto")
+pytest.importorskip("cryptography")
 
 from plug import suites
 from plug.adapters.eudi import EudiAdapter

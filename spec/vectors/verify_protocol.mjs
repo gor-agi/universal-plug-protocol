@@ -68,15 +68,61 @@ const b58decode = (s) => {
   if (h.length % 2) h = "0" + h;
   return Buffer.concat([Buffer.alloc(s.length - s.replace(/^1+/, "").length), unhex(h)]);
 };
+const b58encode = (bytes) => {
+  let n = BigInt("0x" + (hex(bytes) || "0")), out = "";
+  while (n > 0n) { out = B58[Number(n % 58n)] + out; n /= 58n; }
+  let zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  return "1".repeat(zeros) + out;
+};
 const MULTICODEC = { ed25519: [0xed, 0x01], "ecdsa-p256": [0x80, 0x24] };
+// Canonical did:key only (SPEC.md, Signature suites): a 32-byte Ed25519 key or a 33-byte compressed point,
+// spelled so that re-encoding gives the same identifier.
 const parseDidKey = (did) => {
   const base = did.split("#")[0];
   if (!base.startsWith("did:key:z")) throw new Error("not a did:key");
   const raw = b58decode(base.slice("did:key:z".length));
   for (const [alg, prefix] of Object.entries(MULTICODEC)) {
-    if (raw[0] === prefix[0] && raw[1] === prefix[1]) return [alg, raw.subarray(2)];
+    if (raw[0] === prefix[0] && raw[1] === prefix[1]) {
+      const key = raw.subarray(2);
+      if (alg === "ed25519" ? key.length !== 32 : key.length !== 33 || (key[0] !== 2 && key[0] !== 3)) {
+        throw new Error("non-canonical key encoding");
+      }
+      if ("did:key:z" + b58encode(raw) !== base) throw new Error("non-canonical did:key");
+      return [alg, key];
+    }
   }
   throw new Error("unsupported multicodec");
+};
+
+// Ed25519 keys of small order verify forged signatures under OpenSSL; reject them (RFC 8032 5.1.3 decoding, [8]P).
+const P = 2n ** 255n - 19n;
+const mod = (a) => ((a % P) + P) % P;
+const pow = (b, e) => { let r = 1n; b = mod(b); while (e > 0n) { if (e & 1n) r = r * b % P; b = b * b % P; e >>= 1n; } return r; };
+const D = mod(-121665n * pow(121666n, P - 2n));
+const SQRT_M1 = pow(2n, (P - 1n) / 4n);
+const edSmallOrderOrInvalid = (key) => {
+  if (key.length !== 32) return true;
+  const bytes = Buffer.from(key);
+  const sign = bytes[31] >> 7;
+  bytes[31] &= 0x7f;
+  const y = BigInt("0x" + Buffer.from(bytes).reverse().toString("hex"));
+  if (y >= P) return true;
+  const u = mod(y * y - 1n), v = mod(D * y * y + 1n);
+  let x = mod(u * pow(v, 3n) * pow(u * pow(v, 7n), (P - 5n) / 8n));
+  if (mod(v * x * x - u) !== 0n) {
+    x = mod(x * SQRT_M1);
+    if (mod(v * x * x - u) !== 0n) return true;
+  }
+  if (x === 0n && sign) return true;
+  if (Number(x & 1n) !== sign) x = P - x;
+  let [X, Y, Z] = [x, y, 1n];
+  for (let i = 0; i < 3; i++) {
+    const A = X * X % P, B = Y * Y % P, C = 2n * Z * Z % P, H = mod(A + B);
+    const E = mod(H - (X + Y) * (X + Y)), G = mod(A - B), F = mod(C + G);
+    [X, Y, Z] = [E * F % P, G * H % P, F * G % P];
+  }
+  return X === 0n && Y === Z;
 };
 const b64u = (b) => Buffer.from(b).toString("base64url");
 const publicKey = (alg, raw) => {
@@ -103,6 +149,7 @@ const proofValid = (att, proof) => {
     const issuer = att.issuer;
     const [keyAlg, raw] = parseDidKey(proof.verification_method);
     if (keyAlg !== proof.alg) return false;
+    if (keyAlg === "ed25519" && edSmallOrderOrInvalid(raw)) return false;
     const sig = unhex(proof.sig.replace(/^0x/, ""));
     const key = publicKey(keyAlg, raw);
     const ok = keyAlg === "ed25519"

@@ -70,7 +70,7 @@ def test_jcs_random_doubles_match_node():
 
 
 def test_protocol_vectors_reproduce():
-    pytest.importorskip("Crypto", reason="protocol vectors sign with Ed25519 and P-256")
+    pytest.importorskip("cryptography", reason="protocol vectors sign with Ed25519 and P-256")
     import importlib.util
     spec = importlib.util.spec_from_file_location("generate_protocol", os.path.join(VECTORS, "generate_protocol.py"))
     gen = importlib.util.module_from_spec(spec)
