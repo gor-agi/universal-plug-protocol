@@ -69,7 +69,7 @@ A URL registry is a JSON object `{"issuers": ["did:...", ...]}`. `issuers` is a 
 
 A registry MAY also carry issuer keys: `"keys": {"<issuer DID>": [{"verification_method": "...", "valid_from": "<ISO-8601>", "valid_until": "<ISO-8601>"}]}`. When it lists keys for an issuer, the proof's verification method must be one of them and valid at the **proven time**: the anchored time on a ledger, the time of verification otherwise. A time the issuer claims (`issued_at`) is never used. A key revoked after an anchor still verifies that anchor; a key revoked before it, or any revoked key without an anchor, does not. Registry keys also make issuers verifiable whose DID method no adapter resolves, such as those listed in jurisdictional trust lists.
 6. **settle** — final writes: transfer, register, revoke, plus network-native ops via passthrough op name.
-7. **bridge** — reference a proof made on one network from another. No relayer and no bridge operator is trusted. When both networks are plugged in, the plug queries the source proof, then attests the commitment H(JCS({"plug.bridge": source StateRef})) on the target as fact type `plug.bridge`, signed by the target session. The bridge receipt carries the source reference and the target attestation. `check(bridge receipt)` verifies both sides independently: the source proof is ok, the target anchors exactly that commitment, and the target attestation verifies under its network's rules. Only the reference crosses; value never does. Without a target adapter, the source adapter may publish the reference on the source network, and the receipt stays pending there.
+7. **bridge** — reference a proof made on one network from another. No relayer and no bridge operator is trusted. What a verifier does trust is its own view of each network: the node or endpoint it reads the source and the target from. A verifier that needs more assurance reads each side from a node it runs, or from several independent endpoints, and requires final status on both. When both networks are plugged in, the plug queries the source proof, then attests the commitment H(JCS({"plug.bridge": source StateRef})) on the target as fact type `plug.bridge`, signed by the target session. The bridge receipt carries the source reference and the target attestation. `check(bridge receipt)` verifies both sides independently: the source proof is ok, the target anchors exactly that commitment, and the target attestation verifies under its network's rules. Only the reference crosses; value never does. Without a target adapter, the source adapter may publish the reference on the source network, and the receipt stays pending there.
 8. **subscribe** — event stream for a StateRef.
 
 Every op takes a network handle plus a canonical payload and returns a canonical Receipt. Adapters translate; core never sees network internals.
@@ -100,10 +100,6 @@ Nine codes: auth_failed, not_found, not_authorized, unsupported_op, proof_invali
 
 Receipt hash covers spec_version, op, network, subject_hash, fact_type, issuer, role — never seq. The same subject attested by a different issuer, or under a different fact type, is a different attestation. The plug maintains a 24-hour idempotency cache keyed on that hash. Only ok and pending receipts are cached; a rejected or error receipt is retried on the next call. On a cache hit, the cached receipt is cloned and stamped with the call's fresh seq before return. Settle and bridge bypass the cache by design: they have no subject hash to key on. This is documented, not implicit.
 
-## Diversity signal
-
-Attestation meta may carry model_family (open string) and optional model_id. Over the last 20 prediction.market attestations per market, if distinct families divided by window size drops below 0.3, the plug emits one prediction.monoculture warning attestation per market per 24 hours — edge-triggered, not level-triggered. Warning subject hashes include a nonce so each emission is unique; no dedup is expected or required.
-
 ## Agent oversight profile
 
 A deployment profile for systems in which AI models act on someone's behalf. It treats every model as a potentially compromised insider: authority over the model sits outside it, and evidence of what it did does not depend on the model. No new operations; it fixes vocabulary and rules.
@@ -118,20 +114,24 @@ A deployment profile for systems in which AI models act on someone's behalf. It 
 Rules:
 
 1. **Evidence independent of the model.** `agent.action` is signed by a harness key the model cannot use. Verifiers check it against a trust registry of harness keys, so an attestation signed by a model is rejected. Every meaningful action leaves one; the human-readable record stays with the operator, and its hash is anchored.
-2. **Independent review.** An automated `agent.review` is valid only when its reviewer's `model_family` differs from the actor's. No model verifies its own work, and the diversity signal applies across actors and reviewers.
+2. **Independent review.** An automated `agent.review` is valid only when its reviewer's `model_family` differs from the actor's. No model verifies its own work. A deployment can track model families across actors and reviewers the way the prediction-market profile's diversity signal does for forecasts.
 3. **Containment.** Before each meaningful action, the harness checks the latest `control.halt` and `control.resume` for its actor against the deployment's controller registry, and stops while a valid halt is the most recent. A signal from an issuer outside the registry has no effect.
 4. **Independent rails.** Evidence is anchored on a network the model's operator does not control alone; high-impact actions SHOULD be anchored on more than one.
 5. **Disclosure.** `incident.report` uses salted commitments: the anchor fixes when the disclosure was made, and affected parties receive the fact and the salt.
+
+## Prediction-market profile
+
+A deployment profile for forecasting markets. Like the agent oversight profile, it adds no operations; it applies only to attestations of fact type `prediction.market`.
+
+**Loop.** An agent submits a forecast through prove (fact_type prediction.market), reads consensus through check against a market aggregate StateRef, and reacts through watch on resolution events. The plug makes every step machine-readable; it does not own the market.
+
+**Diversity signal.** Attestation meta may carry model_family (open string) and optional model_id. Over the last 20 prediction.market attestations per market, if distinct families divided by window size drops below 0.3, the plug emits one prediction.monoculture warning attestation per market per 24 hours — edge-triggered, not level-triggered. Warning subject hashes include a nonce so each emission is unique; no dedup is expected or required.
 
 ## Three layers
 
 1. **Attestations — prove.** Binds what happened. Consumers: agents checking counterparty history, oracles, auditors.
 2. **Credentials — check.** Identity, authorization, role legitimacy.
 3. **Settlement — watch.** Event streams, finality, value movement. Currency enters last, as the final strand.
-
-## Prediction-market loop
-
-An agent submits a forecast through prove (fact_type prediction.market), reads consensus through check against a market aggregate StateRef, and reacts through watch on resolution events. The plug makes every step machine-readable; it does not own the market.
 
 ## Adapter contract
 
