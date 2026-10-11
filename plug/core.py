@@ -6,7 +6,7 @@ network SDKs or references any specific backend.
 """
 from __future__ import annotations
 import hashlib, json, time, secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -156,6 +156,7 @@ class Attestation:
     disclosure: list = field(default_factory=list)  # [{salt, hash}, ...] selective disclosure
     anchor: Optional[StateRef] = None  # where the subject hash was recorded; ledger adapters require it
     hash_alg: str = "sha-256"  # algorithm that produced subject_hash: sha-256, sha3-256, sm3
+    inclusion: Optional[dict] = None  # batch membership: {tree, index, size, path, root}; proof and anchor cover root
 
     def __post_init__(self):
         self.fact_type = canon_fact_type(self.fact_type)
@@ -251,6 +252,82 @@ def bridge_commitment(src: "StateRef", hash_alg: str = "sha-256") -> str:
     """Subject hash a target network anchors to reference a proof on another network."""
     return digest(canonical({"plug.bridge": {"network": src.network, "address": src.address,
                                              "kind": src.kind}}).encode("utf-8"), hash_alg)
+
+
+# ---- batch anchoring: RFC 9162 Merkle tree hash and inclusion proofs ----
+
+def _h(data: bytes, alg: str) -> bytes:
+    return bytes.fromhex(digest(data, alg))
+
+
+def merkle_leaf_hash(leaf: bytes, hash_alg: str = "sha-256") -> bytes:
+    return _h(b"\x00" + leaf, hash_alg)
+
+
+def _split(n: int) -> int:
+    k = 1
+    while k * 2 < n:
+        k *= 2
+    return k
+
+
+def merkle_root(leaves: list, hash_alg: str = "sha-256") -> bytes:
+    """MTH(D[n]) of RFC 9162 section 2.1.1 over raw leaf inputs."""
+    if not leaves:
+        return _h(b"", hash_alg)
+    if len(leaves) == 1:
+        return merkle_leaf_hash(leaves[0], hash_alg)
+    k = _split(len(leaves))
+    return _h(b"\x01" + merkle_root(leaves[:k], hash_alg) + merkle_root(leaves[k:], hash_alg), hash_alg)
+
+
+def merkle_path(index: int, leaves: list, hash_alg: str = "sha-256") -> list:
+    """PATH(m, D[n]) of RFC 9162 section 2.1.3.1: sibling hashes from the leaf up."""
+    if len(leaves) <= 1:
+        return []
+    k = _split(len(leaves))
+    if index < k:
+        return merkle_path(index, leaves[:k], hash_alg) + [merkle_root(leaves[k:], hash_alg)]
+    return merkle_path(index - k, leaves[k:], hash_alg) + [merkle_root(leaves[:k], hash_alg)]
+
+
+def merkle_verify_inclusion(leaf_hash: bytes, index: int, size: int, path: list, root: bytes,
+                            hash_alg: str = "sha-256") -> bool:
+    """Inclusion proof verification, RFC 9162 section 2.1.3.2."""
+    width = len(_h(b"", hash_alg))
+    if index < 0 or index >= size or any(len(x) != width for x in (leaf_hash, root, *path)):
+        return False
+    fn, sn, r = index, size - 1, leaf_hash
+    for p in path:
+        if sn == 0:
+            return False
+        if fn & 1 or fn == sn:
+            r = _h(b"\x01" + p + r, hash_alg)
+            if not fn & 1:
+                while not fn & 1 and fn != 0:
+                    fn >>= 1
+                    sn >>= 1
+        else:
+            r = _h(b"\x01" + r + p, hash_alg)
+        fn >>= 1
+        sn >>= 1
+    return sn == 0 and r == root
+
+
+def _inclusion_root(att: "Attestation") -> tuple[Optional[str], Optional[str]]:
+    """(batch root hex, None) when att.inclusion proves its subject is in the batch, else (None, error)."""
+    inc = att.inclusion
+    try:
+        if inc.get("tree") != "rfc9162":
+            return None, "proof_invalid: unsupported batch tree"
+        index, size, root = int(inc["index"]), int(inc["size"]), bytes.fromhex(inc["root"])
+        path = [bytes.fromhex(p) for p in inc["path"]]
+        leaf = merkle_leaf_hash(bytes.fromhex(att.subject_hash), att.hash_alg)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None, "proof_invalid: bad inclusion proof"
+    if not merkle_verify_inclusion(leaf, index, size, path, root, att.hash_alg):
+        return None, "proof_invalid: subject is not in the batch"
+    return root.hex(), None
 
 
 def _expiry_error(expires_at: Optional[str]) -> Optional[str]:
@@ -427,6 +504,7 @@ class Plug:
             r.data.setdefault("fact_type", att.fact_type)
             r.data.setdefault("issuer", att.issuer)
             r.data.setdefault("hash_alg", att.hash_alg)
+            r.data.setdefault("issued_at", att.issued_at)
             if salt:
                 r.data["salt"] = salt
             if r.status in (Status.OK, Status.PENDING):
@@ -462,7 +540,16 @@ class Plug:
         for err in (_expiry_error(att.expires_at), _disclosure_error(att.disclosure)):
             if err:
                 return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
-        return self._adapter(net).verify(att, net, trust_registry)
+        if att.inclusion is None:
+            return self._adapter(net).verify(att, net, trust_registry)
+        root, err = _inclusion_root(att)
+        if err:
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
+        batch = replace(att, subject_hash=root, inclusion=None, meta=dict(att.meta))
+        r = self._adapter(net).verify(batch, net, trust_registry)
+        data = dict(r.data, subject_hash=att.subject_hash, batch_root=root,
+                    leaf_index=int(att.inclusion["index"]), batch_size=int(att.inclusion["size"]))
+        return Receipt(r.spec_version, r.op, r.status, r.network, r.state_ref, data, r.error, r.seq)
 
     def _bind(self, adapter: Adapter, network: str) -> Adapter:
         s = self.active()
@@ -512,6 +599,36 @@ class Plug:
                           issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), meta=meta or {},
                           hash_alg=self.hash_alg)
         return self._attest(network, att, idem_subject=plain if salt else None, salt=salt)
+
+    def prove_batch(self, facts: list, fact_type: str, network: Optional[str] = None,
+                    meta: Optional[dict] = None) -> list[Receipt]:
+        """prove for many facts with one anchor: the RFC 9162 root is attested and signed once,
+        and each fact's receipt carries its inclusion proof. Not a new operation."""
+        if not facts:
+            raise ValueError("prove_batch needs at least one fact")
+        plains = [digest(fact_bytes(f), self.hash_alg) for f in facts]
+        salts = [secrets.token_bytes(32).hex() if self.commitment == "salted" else None for _ in facts]
+        subjects = [commitment(f, s, self.hash_alg) if s else p for f, s, p in zip(facts, salts, plains)]
+        leaves = [bytes.fromhex(s) for s in subjects]
+        root = merkle_root(leaves, self.hash_alg).hex()
+        issuer = self.active().credential_subject if self.active() else "did:plug:anon"
+        ft = canon_fact_type(fact_type)
+        batch = Attestation(subject_hash=root, fact_type="plug.batch", issuer=issuer,
+                            issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                            meta=dict(meta or {}, batch_size=len(facts), batch_fact_type=ft), hash_alg=self.hash_alg)
+        plain_root = merkle_root([bytes.fromhex(p) for p in plains], self.hash_alg).hex()
+        r = self._attest(network, batch, idem_subject=plain_root if self.commitment == "salted" else None)
+        receipts = []
+        for i, subject in enumerate(subjects):
+            data = {"subject_hash": subject, "fact_type": ft, "issuer": issuer, "hash_alg": self.hash_alg,
+                    "issued_at": batch.issued_at,
+                    "proof": dict(r.data.get("proof") or {}), "batch_root": root,
+                    "inclusion": {"tree": "rfc9162", "index": i, "size": len(subjects), "root": root,
+                                  "path": [p.hex() for p in merkle_path(i, leaves, self.hash_alg)]}}
+            if salts[i]:
+                data["salt"] = salts[i]
+            receipts.append(Receipt(SPEC_VERSION, "attest", r.status, r.network, r.state_ref, data, r.error, r.seq))
+        return receipts
 
     def check(self, target: Any, network: Optional[str] = None, trust_registry=None) -> dict:
         if isinstance(target, Receipt) and target.op == "bridge":

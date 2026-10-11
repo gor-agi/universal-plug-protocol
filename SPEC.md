@@ -86,7 +86,9 @@ Rules: explicit network beats active session; neither exists means error, not gu
 - **check(target, network?)** → {valid: bool, receipt}. Target is an Attestation, StateRef, or DID string.
 - **watch(target, filter?)** → stream handle. Target is a StateRef.
 
-Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe.
+**Batch anchoring.** `prove_batch(facts, fact_type, network?, meta?)` is prove applied to many facts with one anchor; it is not a new operation. The facts' subject hashes (salted individually under `commitment = salted`) are the leaves of an RFC 9162 Merkle tree; the root is attested once as fact type `plug.batch` and signed once. Each fact's attestation carries `inclusion: {tree: "rfc9162", index, size, path, root}`, and its proof and anchor are those of the root. check verifies the inclusion proof by the RFC 9162 algorithm, then verifies the root under the network's rules. Cost per fact falls with batch size, and no aggregation server is involved: the issuer batches its own facts.
+
+Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only inline or by name from a server-side allowlist.
 
 ## Error model
 
