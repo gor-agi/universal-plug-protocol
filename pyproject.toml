@@ -11,9 +11,8 @@ license-files = ["LICENSE", "NOTICE"]
 dependencies = []
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
-    "Topic :: Internet :: Internet",
+    "Topic :: Security :: Cryptography",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
