@@ -139,8 +139,25 @@ A ledger adapter anchors the subject hash in a transaction the ledger itself aut
 
 ## Oracle adapters
 
-Oracle adapters observe external reality — sensors, webhooks, human witnesses, Chainlink-style feeds — and commit observations through prove. The plug never becomes the oracle; it gives oracles a seat at the same table as chains.
+Oracle adapters observe external reality — sensors, webhooks, human witnesses, price and data feeds — and commit observations through prove. The plug never becomes the oracle; it gives oracles a seat at the same table as chains.
 
 An oracle adapter implements the eight core ops like any backend. Its distinctive responsibility: the attest path takes an external observation (a reading, a document hash, a GPS fix), hashes it as the subject, and signs with the oracle's own key. Query returns the latest committed observation for a StateRef. Verify checks the oracle's signature and optionally a trust registry of authorized oracles. Subscribe polls for new observations.
 
 No new ops. No oracle-specific vocabulary in core. Fact types remain an open vocabulary — sensor.reading, gps.fix, doc.sha256 are recommendations, not mandates. The oracle's trustworthiness is a property of the adapter's key and its registry, not of the plug.
+
+## Appendix A: Known problems in existing approaches (informative)
+
+This appendix is not normative. It lists recurring problems in established attestation, timestamping, credential, and cross-network designs, and the part of this specification that addresses each. Approaches are named by category, not by product.
+
+| Problem | Where it occurs | Answer in this specification |
+| --- | --- | --- |
+| One ledger transaction per attestation, so cost grows linearly with volume | per-attestation on-chain registries | Batch anchoring: one RFC 9162 root per batch, an inclusion proof per fact |
+| Batching depends on a third-party aggregation server | calendar-based timestamping services | The issuer batches its own facts; no aggregator is trusted or required |
+| Naive Merkle trees let an interior node pass as a leaf | ad hoc batching schemes | RFC 9162 domain separation between leaf and node hashes |
+| Issuer keys rotate or leak; old signatures become unverifiable, or a stolen key backdates new ones | verifiable credentials, trust lists | Registry keys with validity windows, judged at the proven time, never at a time the issuer claims |
+| Trust lists are jurisdiction-specific and often carry no keys | wallet trust frameworks | One registry format, inline or by URL, mapping issuers to keys under any jurisdiction |
+| Cross-network transfers rely on trusted relayers or multisignature committees, the source of the largest losses in the field | cross-chain bridges | Relayer-free bridge: only a reference crosses, and check verifies both sides independently |
+| Personal data written to immutable ledgers cannot be erased | on-chain attestation schemas | Salted commitments: deleting the salt leaves the anchor unlinkable |
+| Hashes differ between implementations because serialization differs | JSON-based credential formats | RFC 8785 canonical form with independently generated conformance vectors |
+| A single operator or identity provider is a point of failure and control | centralized transparency logs, keyless signing | Any rail, issuer-held keys, and verification that trusts neither the issuer nor the operator |
+| An AI model attests to its own actions | agent frameworks with self-reported logs | Agent oversight profile: the harness signs, reviews come from another model family |

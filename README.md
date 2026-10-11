@@ -12,7 +12,6 @@ A network-agnostic Python core for attestations and identity. Callers use prove,
 - `plug.adapters.ChainMakerAdapter` — permissioned ledger with certificate-based membership (ChainMaker v3). Anchors subject hashes through a one-opcode EVM contract; verification binds the issuer to the member's P-256 key and reports the member organization and finality.
 - `plug.adapters.LiveAdapter` — Ethereum-family adapter (Sepolia by default). Install the `live` extra. Set `SEPOLIA_RPC_URL`; a session brings its key as raw auth material, and `SEPOLIA_PRIVATE_KEY` is the optional default. Attest signs the subject hash, records it on-chain, and sets the attestation's `anchor`. Verify passes only when the signature, the issuer DID, and the on-chain anchor all name the same key and carry the same hash; it reports `anchored_at` and finality.
 - `plug.mcp_server` — Model Context Protocol transport: prove, prove_batch, check, watch, networks. Keys stay server-side. Run `python -m plug.mcp_server --config plug-mcp.json` (install the `mcp` extra).
-- `sketches/` — CLI sketch. It is not imported by the package.
 
 Watch returns a stream handle. The stub appends a matching `event` record to the adapter log. The Sepolia adapter polls that transaction's receipt once per subscribe and records the tx and logs selected by the filter. This package does not open a long-lived socket.
 
