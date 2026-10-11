@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .. import suites
-from ..core import Adapter, Attestation, Identity, PlugError, Receipt, StateRef, Status, SPEC_VERSION
-from .base import LoggingAdapter, resolve_trust_registry
+from ..core import Adapter, Attestation, Identity, PlugError, Receipt, StateRef, Status, SPEC_VERSION, parse_time
+from .base import LoggingAdapter, registry_key_status, resolve_trust_registry
 
 # Creation code: PUSH1 01 DUP1 PUSH1 0b PUSH1 00 CODECOPY PUSH1 00 RETURN, then runtime STOP.
 ANCHOR_CREATION_CODE = "600180600b6000396000f300"
@@ -240,6 +240,9 @@ class ChainMakerAdapter(LoggingAdapter, Adapter):
             return reject("proof_invalid: anchor was sent by another key")
         if found.data["calldata"] != anchor_calldata(att.subject_hash):
             return reject("proof_invalid: anchor does not carry the subject hash")
+        _, err = registry_key_status(data, att.issuer, method, parse_time(found.data["anchored_at"]))
+        if err:
+            return reject(err)
         data.update({"verified": True, "alg": "ecdsa-p256", "verification_method": method,
                      "anchor": att.anchor.address, "anchored_block": found.data["block"],
                      "anchored_at": found.data["anchored_at"], "org_id": found.data["org_id"],

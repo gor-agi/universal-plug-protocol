@@ -111,16 +111,19 @@ class EudiAdapter(LoggingAdapter, Adapter):
         net = network or "default"
         # EUDI: resolve ETSI trusted lists first if configured and no explicit registry
         if self.trusted_lists and not trust_registry:
-            all_issuers = []
+            all_issuers, all_keys = [], {}
             for url in self.trusted_lists:
                 try:
                     doc = fetch_registry(url)
                     all_issuers.extend(doc["issuers"])
+                    for did, entries in doc.get("keys", {}).items():
+                        all_keys.setdefault(did, []).extend(entries)
                 except PlugError as e:
                     return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net,
                                    error=f"{e.code}: trusted list {url}: {e.message}")
             if all_issuers:
-                trust_registry = {"issuers": list(set(all_issuers))}
+                trust_registry = {"issuers": list(dict.fromkeys(all_issuers)),
+                                  **({"keys": all_keys} if all_keys else {})}
         trust = resolve_trust_registry(self.query, trust_registry, net, att.issuer)
         if isinstance(trust, Receipt):
             return trust

@@ -19,7 +19,7 @@ from typing import Any, Optional
 
 from .. import suites
 from ..core import Adapter, Attestation, Identity, Receipt, StateRef, Status, PlugError, SPEC_VERSION
-from .base import LoggingAdapter, resolve_trust_registry
+from .base import LoggingAdapter, registry_key_status, resolve_trust_registry
 
 try:
     from web3 import Web3
@@ -281,9 +281,13 @@ class LiveAdapter(LoggingAdapter, Adapter):
         if found.data["data"] != "0x" + att.subject_hash.lower():
             return reject("proof_invalid: anchor does not carry the subject hash")
         stamp = self.w3.eth.get_block(found.data["block"])["timestamp"]
+        anchored = datetime.fromtimestamp(stamp, timezone.utc)
+        _, err = registry_key_status(data, att.issuer, detail, anchored)
+        if err:
+            return reject(err)
         data.update({"verified": True, "anchor": att.anchor.address,
                      "anchored_block": found.data["block"],
-                     "anchored_at": datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "anchored_at": anchored.strftime("%Y-%m-%dT%H:%M:%SZ"),
                      "finality": found.data["finality"]})
         self.log.append({"op": "verify", "ok": True})
         return Receipt(SPEC_VERSION, "verify", Status.OK, network, data=data)

@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from ..core import PlugError, Receipt, SPEC_VERSION, StateRef, Status
+from ..core import PlugError, Receipt, SPEC_VERSION, StateRef, Status, parse_time
 
 _REGISTRY_TIMEOUT = 5
 _REGISTRY_MAX_BYTES = 64 * 1024
@@ -80,6 +81,60 @@ def _issuer_list(doc) -> list[str]:
     return issuers
 
 
+def _registry_keys(doc) -> dict:
+    """Optional {issuer DID: [{verification_method, valid_from?, valid_until?}]} of a registry document."""
+    keys = doc.get("keys") if isinstance(doc, dict) else None
+    if keys is None:
+        return {}
+    bad = PlugError("proof_invalid", "trust registry keys must map issuers to lists of "
+                                      "{verification_method, valid_from, valid_until}")
+    if not isinstance(keys, dict):
+        raise bad
+    out = {}
+    for did, entries in keys.items():
+        if not isinstance(did, str) or not isinstance(entries, list) or not entries:
+            raise bad
+        clean = []
+        for e in entries:
+            if not isinstance(e, dict) or not isinstance(e.get("verification_method"), str):
+                raise bad
+            try:
+                for f in ("valid_from", "valid_until"):
+                    if e.get(f) is not None:
+                        parse_time(e[f])
+            except (AttributeError, ValueError) as err:
+                raise bad from err
+            clean.append({k: e[k] for k in ("verification_method", "valid_from", "valid_until")
+                          if e.get(k) is not None})
+        out[did] = clean
+    return out
+
+
+def _norm_method(method: str) -> str:
+    base = (method or "").split("#", 1)[0]
+    return base.lower() if base.lower().startswith("0x") else base
+
+
+def registry_key_status(data: dict, issuer: str, method: str, at: datetime) -> tuple[bool, str | None]:
+    """(applies, error) for the registry's keys of this issuer, evaluated at a proven time.
+
+    applies is False when the registry lists no keys for the issuer. Callers pass the
+    anchored time on a ledger and the current time otherwise, never a time the issuer claims.
+    """
+    entries = (((data or {}).get("trust_registry") or {}).get("keys") or {}).get(issuer)
+    if not entries:
+        return False, None
+    listed = [e for e in entries if _norm_method(e["verification_method"]) == _norm_method(method)]
+    if not listed:
+        return True, "proof_invalid: key not listed for issuer in trust registry"
+    for e in listed:
+        start = parse_time(e["valid_from"]) if e.get("valid_from") else None
+        end = parse_time(e["valid_until"]) if e.get("valid_until") else None
+        if (start is None or start <= at) and (end is None or at < end):
+            return True, None
+    return True, f"proof_invalid: key not valid at {at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+
 def fetch_registry(url: str) -> dict:
     """GET a registry document: {"issuers": ["did:...", ...]}. http and https only."""
     parsed = urlparse(url)
@@ -105,7 +160,11 @@ def fetch_registry(url: str) -> dict:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise PlugError("proof_invalid", f"trust registry is not JSON: {e}") from e
-    return {"url": url, "issuers": _issuer_list(doc)}
+    out = {"url": url, "issuers": _issuer_list(doc)}
+    keys = _registry_keys(doc)
+    if keys:
+        out["keys"] = keys
+    return out
 
 
 def _membership(issuer: str | None, issuers: list[str], payload: dict, network: str):
@@ -124,16 +183,25 @@ def check_signature(att, network: str, data: dict) -> Receipt:
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data,
                        error="proof_invalid: unsupported alg")
     data["alg"] = alg
-    if alg == "signature" or issuer_key(att.issuer) is None:
+    has_keys = bool((((data.get("trust_registry") or {}).get("keys")) or {}).get(att.issuer))
+    resolvable = issuer_key(att.issuer) is not None
+    if alg == "signature" or not (resolvable or has_keys):
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data,
                        error="proof_invalid: unverifiable")
     ok, detail = verify(att.subject_hash, att.proof)
     if not ok:
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data, error=detail)
-    if not binds(att.issuer, detail):
+    if resolvable and not binds(att.issuer, detail):
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data,
                        error="proof_invalid: issuer is not bound to the signing key")
+    # Nothing here proves when the signature was made, so registry keys are judged as of now.
+    now = datetime.now(timezone.utc)
+    applies, err = registry_key_status(data, att.issuer, detail, now)
+    if err:
+        return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data, error=err)
     data.update({"verified": True, "verification_method": detail, "hash_alg": att.hash_alg})
+    if applies:
+        data["key_checked_at"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     return Receipt(SPEC_VERSION, "verify", Status.OK, network, data=data)
 
 
@@ -149,10 +217,12 @@ def resolve_trust_registry(query, trust_registry, network: str, issuer: str | No
     if isinstance(trust_registry, dict):
         try:
             issuers = _issuer_list(trust_registry)
+            keys = _registry_keys(trust_registry)
         except PlugError as e:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network,
                            error=f"{e.code}: {e.message}")
-        return _membership(issuer, issuers, {"issuers": issuers}, network)
+        payload = {"issuers": issuers, **({"keys": keys} if keys else {})}
+        return _membership(issuer, issuers, payload, network)
     if isinstance(trust_registry, str):
         try:
             doc = fetch_registry(trust_registry)
