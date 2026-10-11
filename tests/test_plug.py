@@ -658,3 +658,17 @@ def test_from_receipt_rejects_non_attest_receipts():
     with pytest.raises(PlugError) as e:
         Attestation.from_receipt(Receipt("verify", Status.OK, NET, data={"x": 1}))
     assert e.value.code == "proof_invalid"
+
+
+def test_corrupt_lines_in_a_shared_log_are_skipped(tmp_path):
+    from upp import ANY, Attestation, LocalLedger, Plug
+    path = tmp_path / "log.jsonl"
+    p = Plug(trust={"log": ANY})
+    p.register("log", LocalLedger(str(path)))
+    p.open("log")
+    r = p.prove("kept", "doc.sha256")
+    with open(path, "a") as f:
+        f.write("not json\n[1]\n{\"network\": \"log\"}\n\n")
+    q = Plug(trust={"log": ANY})
+    q.register("log", LocalLedger(str(path)))
+    assert q.check(Attestation.from_receipt(r))["valid"] is True

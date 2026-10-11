@@ -38,9 +38,13 @@ class LocalLedger(Ledger):
         if self.path and os.path.exists(self.path):
             with open(self.path, encoding="utf-8") as f:
                 for line in f:
-                    if line.strip():
+                    try:
                         rec = json.loads(line)
-                        self._records.setdefault((rec["network"], rec["statement_hash"]), rec)
+                        key = (rec["network"], rec["statement_hash"])
+                        parse_time(rec["anchored_at"])
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        continue  # a corrupt or foreign line is no record; it never blocks the others
+                    self._records.setdefault(key, rec)
 
     def connect(self, network: str, auth: dict) -> dict:
         signer = auth.get("signer")
