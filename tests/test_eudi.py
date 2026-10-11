@@ -1,0 +1,240 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Contributors to the Universal Plug Protocol project
+"""EudiAdapter: trusted lists and IETF Token Status Lists over a local HTTP server. Real signatures, no network."""
+import base64
+import json
+import threading
+import time
+import zlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+pytest.importorskip("Crypto")
+
+from plug import suites
+from plug.adapters.eudi import EudiAdapter, decode_status_list, status_at
+from plug.core import Attestation, Plug, PlugError, statement_hash
+
+NET = "eudi"
+NOW = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+class Server:
+    """Serves path -> (content type, body); counts hits; can go down."""
+
+    def __init__(self):
+        self.docs, self.hits, self.down = {}, {}, False
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.hits[self.path] = outer.hits.get(self.path, 0) + 1
+                if outer.down or self.path not in outer.docs:
+                    self.send_response(503 if outer.down else 404)
+                    self.end_headers()
+                    return
+                ctype, body = outer.docs[self.path]
+                raw = body if isinstance(body, bytes) else body.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def url(self, path):
+        return self.base + path
+
+
+@pytest.fixture
+def server():
+    s = Server()
+    yield s
+    s.httpd.shutdown()
+
+
+def b64u(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def lst(statuses, bits=1) -> str:
+    array = bytearray((len(statuses) * bits + 7) // 8)
+    for i, value in enumerate(statuses):
+        array[(i * bits) // 8] |= value << ((i * bits) % 8)
+    return b64u(zlib.compress(bytes(array), 9))
+
+
+class Issuer:
+    def __init__(self, alg="ecdsa-p256"):
+        self.alg, self.key = alg, suites.generate_key(alg)
+        self.did = suites.sign(alg, self.key, "00" * 32)["verification_method"]
+
+    def token(self, uri, statuses=None, bits=1, header=None, claims=None, status_list=None):
+        jose = {"ecdsa-p256": "ES256", "ed25519": "EdDSA"}[self.alg]
+        head = dict({"alg": jose, "typ": "statuslist+jwt", "kid": self.did}, **(header or {}))
+        body = dict({"sub": uri, "iat": int(time.time()), "ttl": 3600,
+                     "status_list": status_list or {"bits": bits, "lst": lst(statuses or [0], bits)}},
+                    **(claims or {}))
+        signing_input = f"{b64u(json.dumps(head).encode())}.{b64u(json.dumps(body).encode())}"
+        signer = {"ecdsa-p256": suites._p256_sign, "ed25519": suites._ed_sign}[self.alg]
+        sig, _ = signer(self.key, signing_input.encode())
+        return f"{signing_input}.{b64u(sig)}"
+
+    def credential(self, p, fact, idx, uri, issuer=None):
+        meta = {"status": {"status_list": {"idx": idx, "uri": uri}}} if uri else {}
+        att = Attestation(suites.digest(fact.encode()), "identity.pid", issuer or self.did, NOW(), meta=meta)
+        att.proof = suites.sign(self.alg, self.key, statement_hash(att))
+        p.attest(NET, att)
+        return att
+
+
+def plug(**kw):
+    p = Plug()
+    p.register_adapter(NET, EudiAdapter(**kw))
+    return p
+
+
+def publish(server, issuer, path, statuses, bits=1, **kw):
+    server.docs[path] = ("application/statuslist+jwt", issuer.token(server.url(path), statuses, bits, **kw))
+    return server.url(path)
+
+
+# ---- the draft's own examples (draft-ietf-oauth-status-list, section 4.2) ----
+
+def test_decodes_the_drafts_worked_examples():
+    bits, array = decode_status_list({"bits": 1, "lst": "eNrbuRgAAhcBXQ"})
+    assert array == bytes([0xB9, 0xA3])
+    assert [status_at(bits, array, i) for i in range(16)] == [1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1]
+    bits, array = decode_status_list({"bits": 2, "lst": "eNo76fITAAPfAgc"})
+    assert array == bytes([0xC9, 0x44, 0xF9])
+    assert [status_at(bits, array, i) for i in range(12)] == [1, 2, 0, 3, 0, 1, 0, 1, 1, 2, 3, 3]
+    with pytest.raises(PlugError, match="out of range"):
+        status_at(1, bytes([0xB9, 0xA3]), 16)
+
+
+def test_malformed_and_oversized_lists_are_rejected():
+    for bad in ({"bits": 3, "lst": "eNrbuRgAAhcBXQ"}, {"bits": True, "lst": "eNrbuRgAAhcBXQ"},
+                {"bits": 1, "lst": b64u(b"not zlib")}, {"bits": 1, "lst": 7}, "nope",
+                {"bits": 1, "lst": b64u(zlib.compress(bytes(32))[:-4])}):
+        with pytest.raises(PlugError):
+            decode_status_list(bad)
+    bomb = b64u(zlib.compress(bytes(17 << 20), 9))
+    with pytest.raises(PlugError, match="too large"):
+        decode_status_list({"bits": 1, "lst": bomb})
+
+
+# ---- status checks through check() ----
+
+@pytest.mark.parametrize("alg", ["ecdsa-p256", "ed25519"])
+def test_valid_revoked_and_suspended(server, alg):
+    issuer, p = Issuer(alg), plug()
+    uri = publish(server, issuer, "/sl/1", [0, 1, 2, 0], bits=2)
+    expect = {0: None, 1: "proof_invalid: revoked via status list", 2: "proof_invalid: suspended via status list"}
+    for idx, error in expect.items():
+        v = p.check(issuer.credential(p, f"pid-{idx}", idx, uri), network=NET)
+        assert v["valid"] is (error is None) and v["receipt"].error == error, idx
+
+
+def test_out_of_range_index_fails_closed(server):
+    issuer, p = Issuer(), plug()
+    uri = publish(server, issuer, "/sl/1", [0] * 8)
+    v = p.check(issuer.credential(p, "pid", 8, uri), network=NET)
+    assert v["receipt"].error == "proof_invalid: status list: idx is out of range"
+
+
+def test_status_list_token_must_be_the_issuers_and_well_formed(server):
+    issuer, stranger, p = Issuer(), Issuer(), plug()
+    cases = {
+        "/forged": (stranger, {}, "proof_invalid: status list token is not signed by a key of the issuer"),
+        "/typ": (issuer, {"header": {"typ": "JWT"}}, "proof_invalid: status list token typ is not statuslist+jwt"),
+        "/sub": (issuer, {"claims": {"sub": "https://elsewhere.example/sl"}},
+                 "proof_invalid: status list token sub does not match the reference uri"),
+        "/exp": (issuer, {"claims": {"exp": int(time.time()) - 1}}, "proof_invalid: status list token expired"),
+        "/iat": (issuer, {"claims": {"iat": None}}, "proof_invalid: status list token has no iat"),
+        "/alg": (issuer, {"header": {"alg": "none"}},
+                 "proof_invalid: status list token is not signed by a key of the issuer"),
+    }
+    for path, (signer, kw, error) in cases.items():
+        uri = publish(server, signer, path, [0], **kw)
+        v = p.check(issuer.credential(p, path, 0, uri), network=NET)
+        assert v["valid"] is False and v["receipt"].error == error, path
+    head, body, sig = issuer.token(server.url("/tampered"), [1]).split(".")
+    claims = json.loads(base64.urlsafe_b64decode(body + "=="))
+    claims["status_list"]["lst"] = lst([0])
+    server.docs["/tampered"] = ("application/statuslist+jwt", f"{head}.{b64u(json.dumps(claims).encode())}.{sig}")
+    v = p.check(issuer.credential(p, "tampered", 0, server.url("/tampered")), network=NET)
+    assert v["receipt"].error == "proof_invalid: status list token is not signed by a key of the issuer"
+
+
+def test_legacy_or_malformed_status_references_are_rejected_not_skipped(server):
+    issuer, p = Issuer(), plug()
+    for meta in ({"status_list_url": server.url("/x"), "status_list_index": 0}, {"status": {}},
+                 {"status": {"status_list": {"idx": -1, "uri": server.url("/x")}}},
+                 {"status": {"status_list": {"idx": "0", "uri": server.url("/x")}}}):
+        att = Attestation(suites.digest(json.dumps(meta).encode()), "identity.pid", issuer.did, NOW(), meta=meta)
+        att.proof = suites.sign(issuer.alg, issuer.key, statement_hash(att))
+        p.attest(NET, att)
+        v = p.check(att, network=NET)
+        assert v["valid"] is False and "status list" in v["receipt"].error, meta
+
+
+def test_cache_respects_poll_and_ttl_and_fails_closed(server):
+    issuer, p = Issuer(), plug(status_list_poll=300)
+    uri = publish(server, issuer, "/sl/c", [0, 1])
+    good, revoked = issuer.credential(p, "a", 0, uri), issuer.credential(p, "b", 1, uri)
+    assert p.check(good, network=NET)["valid"] is True
+    assert p.check(revoked, network=NET)["valid"] is False
+    assert server.hits["/sl/c"] == 1, "a fresh token is reused within the poll interval"
+
+    server.down = True
+    p0 = plug(status_list_poll=0)
+    assert p0.check(issuer.credential(p0, "c", 0, uri), network=NET)["receipt"].error.startswith(
+        "not_found: status list unreachable")
+
+    server.down = False
+    short = plug(status_list_poll=0)
+    uri2 = publish(server, issuer, "/sl/short", [0], claims={"exp": int(time.time()) + 2})
+    att = issuer.credential(short, "d", 0, uri2)
+    assert short.check(att, network=NET)["valid"] is True
+    server.down = True
+    assert short.check(att, network=NET)["valid"] is True, "an unexpired cached copy is served while down"
+    time.sleep(2.1)
+    v = short.check(att, network=NET)
+    assert v["valid"] is False and "status list unreachable" in v["receipt"].error, "never past exp"
+
+
+# ---- trusted lists ----
+
+def test_trusted_lists_supply_issuers_and_keys(server):
+    provider = Issuer()
+    did_web = "did:web:pid-provider.example"
+    server.docs["/tl/a.json"] = ("application/json", json.dumps({"issuers": [did_web]}))
+    server.docs["/tl/b.json"] = ("application/json", json.dumps(
+        {"issuers": ["did:web:other.example"], "keys": {did_web: [{"verification_method": provider.did}]}}))
+    p = plug(trusted_lists=[server.url("/tl/a.json"), server.url("/tl/b.json")])
+    uri = publish(server, provider, "/sl/web", [0, 1])
+    v = p.check(provider.credential(p, "pid", 0, uri, issuer=did_web), network=NET)
+    assert v["valid"] is True, v["receipt"].error
+    assert v["receipt"].data["trust_registry"]["keys"][did_web][0]["verification_method"] == provider.did
+    assert p.check(provider.credential(p, "pid-r", 1, uri, issuer=did_web), network=NET)["receipt"].error == \
+        "proof_invalid: revoked via status list"
+
+    outsider = Issuer()
+    v = p.check(outsider.credential(p, "x", 0, None), network=NET)
+    assert v["receipt"].error == "not_authorized: issuer not in trust registry"
+
+    hits = dict(server.hits)
+    explicit = {"issuers": [outsider.did]}
+    assert p.check(outsider.credential(p, "y", 0, None), network=NET, trust_registry=explicit)["valid"] is True
+    assert server.hits == hits, "an explicit registry replaces the trusted lists"
+
+    down = plug(trusted_lists=[server.url("/tl/a.json"), server.url("/tl/missing.json")])
+    v = down.check(provider.credential(down, "z", 0, uri, issuer=did_web), network=NET)
+    assert v["valid"] is False and "trusted list" in v["receipt"].error

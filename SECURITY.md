@@ -25,4 +25,5 @@ Out of scope: vulnerabilities in third-party networks or in optional dependencie
 - **SM2 signing backend.** The `sm2-sm3` suite performs curve arithmetic through a pure-Python library that is not constant-time. Verification is unaffected. Signing on hosts exposed to timing measurement requires a constant-time backend.
 - **Ledger finality.** Verification reports finality; it does not wait for it. Relying parties choose their own threshold.
 - **Signed time is a claim.** A proof signs the attestation's statement: subject hash, type, issuer, `issued_at`, `expires_at`, role, and meta. `issued_at` is the issuer's signed claim, not evidence of when; the anchored time comes from the ledger, and registry keys are judged at it.
+- **Status lists.** The EUDI adapter reads Token Status Lists in JWT form only; a CWT status list, or any token it cannot verify, is rejected. It honours `ttl` and never uses a cached token past its `exp`.
 - **Local DID aliases.** `did:plug` identifiers in local form are meaningful only inside one deployment (see [spec/did-plug.md](spec/did-plug.md)).

@@ -151,22 +151,6 @@ def test_eudi_trusted_list_resolution():
         server.server_close()
 
 
-def test_eudi_status_list_revocation():
-    p = setup_eudi()
-    r = p.prove("x", FactType.SENSOR_READING,
-                meta={"status_list_url": "http://127.0.0.1:1/status.json", "status_list_index": 0})
-    att = Attestation.from_receipt(r)
-    att.proof = {"alg": "signature", "sig": "0x1", "verification_method": "0x2"}
-    # unreachable status list with no cached copy -> fail closed before the signature check
-    v = p.check(att)
-    assert v["valid"] is False
-    assert "status list unreachable" in (v["receipt"].error or "")
-    # the status list reference is signed meta: stripping it does not skip the revocation check
-    stripped = Attestation.from_receipt(r)
-    stripped.meta = {}
-    assert p.check(stripped)["receipt"].error == "proof_invalid: statement does not match the anchor"
-
-
 def test_eudi_subscribe_delivers():
     p = setup_eudi()
     r = p.prove("z", FactType.SENSOR_READING)

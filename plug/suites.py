@@ -293,6 +293,22 @@ def verify(subject_hash: str, proof: dict) -> tuple[bool, str]:
     return (True, method.split("#", 1)[0]) if good else (False, "proof_invalid: bad signature")
 
 
+# JOSE algorithms for JWS made by did:key holders (RFC 7518 ES256, RFC 8037 EdDSA).
+_JOSE = {"ES256": ("ecdsa-p256", _p256_verify), "EdDSA": ("ed25519", _ed_verify)}
+
+
+def verify_jws(signing_input: bytes, signature: bytes, jose_alg: str, method: str) -> bool:
+    """True when a JWS signature over signing_input verifies under the did:key `method`."""
+    suite = _JOSE.get(jose_alg)
+    if suite is None:
+        return False
+    try:
+        key_alg, public = parse_did_key(method)
+    except ValueError:
+        return False
+    return key_alg == suite[0] and suite[1](signing_input, signature, public)
+
+
 def parse_account_did(did: str) -> Optional[tuple[str, str]]:
     """(network, account) for did:plug or did:pkh. network is a CAIP-2 chain ID, or a deployment-local alias."""
     m = _ACCOUNT_DID.match((did or "").split("#", 1)[0])

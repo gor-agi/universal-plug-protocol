@@ -136,7 +136,7 @@ def test_prove_hashes_raw_bytes():
 def test_spec_version_matches_package():
     from plug import __version__
     from plug.core import SPEC_VERSION
-    assert SPEC_VERSION == "0.3.0" == __version__
+    assert SPEC_VERSION == "0.3.0" and __version__.rsplit(".", 1)[0] == SPEC_VERSION.rsplit(".", 1)[0]
 
 def test_seq_cleared_when_attest_fails():
     class Boom(StubAdapter):

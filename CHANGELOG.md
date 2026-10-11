@@ -2,6 +2,18 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.3.1
+
+### Fixed
+
+- **EUDI status lists never worked.** The status list was parsed as a trust registry: a real list (no `issuers`) was always rejected as unreachable, and a list that carried `issuers` lost its status bits, so revoked credentials verified. The adapter now implements IETF Token Status Lists (draft-ietf-oauth-status-list): a `statuslist+jwt` signed with ES256 or EdDSA by a key of the credential's issuer, `sub` equal to the referenced uri, `iat` required, `exp` and `ttl` honoured, 1/2/4/8-bit ZLIB-compressed lists, VALID only for status 0x00. Out-of-range indexes, malformed lists, and decompression beyond 16 MiB are rejected.
+- The status reference moves to `meta.status.status_list {idx, uri}`, as in the draft. The old `status_list_url` / `status_list_index` keys are rejected rather than ignored.
+
+### Added
+
+- `fetch_document` in `plug.adapters.base`: the registry fetch guards (http/https only, timeout, size cap, no redirect off http(s)) for any document. `plug.suites.verify_jws` for ES256 and EdDSA over did:key.
+- Tests for trusted lists, status lists, caching, and the draft's worked examples. EUDI adapter coverage rises from 69% to 95%.
+
 ## 0.3.0
 
 ### Breaking

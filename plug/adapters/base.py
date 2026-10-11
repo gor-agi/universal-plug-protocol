@@ -252,27 +252,34 @@ def registry_key_status(data: dict, issuer: str, method: str, at: datetime) -> t
     return True, f"proof_invalid: key not valid at {at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
 
-def fetch_registry(url: str) -> dict:
-    """GET a registry document: {"issuers": ["did:...", ...]}. http and https only."""
+def fetch_document(url: str, accept: str = "application/json", max_bytes: int = _REGISTRY_MAX_BYTES,
+                   what: str = "trust registry") -> bytes:
+    """GET a document with the registry guards: http and https only, a timeout, a size cap, no redirect off http(s)."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise PlugError("proof_invalid", "trust registry URL must be http or https")
+        raise PlugError("proof_invalid", f"{what} URL must be http or https")
     opener = urllib.request.build_opener(_RegistryRedirect)
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "plug-trust-registry"})
+    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "plug-trust-registry"})
     try:
         with opener.open(req, timeout=_REGISTRY_TIMEOUT) as resp:
-            raw = resp.read(_REGISTRY_MAX_BYTES + 1)
+            raw = resp.read(max_bytes + 1)
     except PlugError:
         raise
     except TimeoutError as e:
-        raise PlugError("timeout", f"trust registry: {e}") from e
+        raise PlugError("timeout", f"{what}: {e}") from e
     except urllib.error.URLError as e:
         reason = getattr(e, "reason", e)
         if isinstance(reason, TimeoutError):
-            raise PlugError("timeout", f"trust registry: {reason}") from e
-        raise PlugError("not_found", f"trust registry: {e}") from e
-    if len(raw) > _REGISTRY_MAX_BYTES:
-        raise PlugError("proof_invalid", "trust registry document is too large")
+            raise PlugError("timeout", f"{what}: {reason}") from e
+        raise PlugError("not_found", f"{what}: {e}") from e
+    if len(raw) > max_bytes:
+        raise PlugError("proof_invalid", f"{what} document is too large")
+    return raw
+
+
+def fetch_registry(url: str) -> dict:
+    """GET a registry document: {"issuers": ["did:...", ...]}. http and https only."""
+    raw = fetch_document(url)
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:

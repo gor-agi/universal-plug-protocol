@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "plug"
-version = "0.3.0"
+version = "0.3.1"
 description = "Network-agnostic layer for attestations and identity across public, permissioned, enterprise, and sovereign networks."
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]

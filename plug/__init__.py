@@ -7,7 +7,7 @@ from .core import (
     digest, commitment, fact_bytes,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __all__ = [
     "Plug", "Adapter", "Attestation", "Identity", "Credential", "StateRef", "Receipt", "Session",
     "Status", "Role", "FactType", "PlugError", "SPEC_VERSION", "canonical", "sha256_hex",

@@ -8,15 +8,80 @@ this adapter satisfies eIDAS 2.0 / ARF 3.0 mandates through
 configuration and adapter-owned resolution.
 """
 from __future__ import annotations
+import base64
+import json
 import time
-from typing import Any, Optional
+import zlib
+from datetime import datetime, timezone
+from typing import Optional
 
-from ..core import (
-    Attestation, PlugError, Receipt, StateRef, Status, SPEC_VERSION,
+from ..core import Attestation, PlugError, Receipt, Status, SPEC_VERSION
+from .base import (
+    InMemoryAdapter, anchor_error, check_signature, fetch_document, fetch_registry, registry_key_status,
+    resolve_trust_registry,
 )
-from .base import InMemoryAdapter, anchor_error, check_signature, fetch_registry, resolve_trust_registry
 
 _DEFAULT_STATUS_LIST_POLL = 300  # 5 minutes
+_STATUS_LIST_MAX_BYTES = 1 << 20          # fetched Status List Token
+_STATUS_LIST_MAX_DECODED = 16 << 20       # decompressed status byte array
+_STATUS_NAMES = {1: "revoked", 2: "suspended"}
+
+
+def _b64url(text: str) -> bytes:
+    if not isinstance(text, str):
+        raise PlugError("proof_invalid", "status list: expected base64url text")
+    try:
+        return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+    except (ValueError, TypeError) as e:
+        raise PlugError("proof_invalid", f"status list: bad base64url: {e}") from e
+
+
+def decode_status_list(status_list) -> tuple[int, bytes]:
+    """(bits, byte array) of a Token Status List: {"bits": 1|2|4|8, "lst": base64url(ZLIB(DEFLATE(bytes)))}."""
+    if not isinstance(status_list, dict):
+        raise PlugError("proof_invalid", "status list: status_list must be an object")
+    bits = status_list.get("bits")
+    if isinstance(bits, bool) or bits not in (1, 2, 4, 8):
+        raise PlugError("proof_invalid", "status list: bits must be 1, 2, 4, or 8")
+    inflater = zlib.decompressobj()
+    try:
+        array = inflater.decompress(_b64url(status_list.get("lst")), _STATUS_LIST_MAX_DECODED)
+    except zlib.error as e:
+        raise PlugError("proof_invalid", f"status list: lst is not ZLIB data: {e}") from e
+    if inflater.unconsumed_tail:
+        raise PlugError("proof_invalid", "status list: decoded list is too large")
+    if not inflater.eof:
+        raise PlugError("proof_invalid", "status list: lst is truncated")
+    return bits, array
+
+
+def status_at(bits: int, array: bytes, idx: int) -> int:
+    """Status value at idx; blocks of `bits` are packed from the least significant bit of each byte."""
+    if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0:
+        raise PlugError("proof_invalid", "status list: idx must be a non-negative integer")
+    position = idx * bits
+    if position // 8 >= len(array):
+        raise PlugError("proof_invalid", "status list: idx is out of range")
+    return (array[position // 8] >> (position % 8)) & ((1 << bits) - 1)
+
+
+def parse_status_list_token(token: str) -> tuple[dict, dict, bytes, bytes]:
+    """(header, claims, signing input, signature) of a compact JWS. Structure only; the signature is checked later."""
+    parts = token.strip().split(".") if isinstance(token, str) else []
+    if len(parts) != 3:
+        raise PlugError("proof_invalid", "status list: not a compact JWT")
+    try:
+        header, claims = json.loads(_b64url(parts[0])), json.loads(_b64url(parts[1]))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise PlugError("proof_invalid", f"status list: bad JWT JSON: {e}") from e
+    if not isinstance(header, dict) or not isinstance(claims, dict):
+        raise PlugError("proof_invalid", "status list: bad JWT JSON")
+    return header, claims, f"{parts[0]}.{parts[1]}".encode("ascii"), _b64url(parts[2])
+
+
+def _expired(claims: dict, now: float) -> bool:
+    exp = claims.get("exp")
+    return isinstance(exp, (int, float)) and not isinstance(exp, bool) and now >= exp
 
 
 class EudiAdapter(InMemoryAdapter):
@@ -24,9 +89,13 @@ class EudiAdapter(InMemoryAdapter):
 
     Parameters
     ----------
-    trusted_lists : list of ETSI TS 119 612 trusted-list URLs
-    status_list_poll : seconds between Token Status List polls
+    trusted_lists : list of trusted-list URLs, each a registry document {"issuers": [...], "keys": {...}}
+    status_list_poll : most seconds a fetched Status List Token is reused (a shorter token ttl wins)
     credential_formats : accepted formats (sd-jwt-vc, mso-mdoc)
+
+    A credential that references a status list carries meta {"status": {"status_list": {"idx", "uri"}}}
+    (IETF Token Status List). The Status List Token must be a statuslist+jwt signed with ES256 or EdDSA by
+    a key of the attestation's issuer: its did:key, or a key the trust registry lists for it.
     """
 
     tx_prefix = "eudi"
@@ -39,8 +108,7 @@ class EudiAdapter(InMemoryAdapter):
         self.trusted_lists = trusted_lists or []
         self.status_list_poll = status_list_poll
         self.credential_formats = credential_formats or ["sd-jwt-vc", "mso-mdoc"]
-        self._status_lists: dict[str, dict] = {}
-        self._last_poll: dict[str, float] = {}
+        self._status_tokens: dict[str, tuple] = {}  # uri -> (parsed token, fetched at)
 
     def attest(self, network: Optional[str], att: Attestation) -> Receipt:
         fmt = att.meta.get("credential_format")
@@ -48,20 +116,85 @@ class EudiAdapter(InMemoryAdapter):
             raise PlugError("unsupported_op", f"credential format {fmt} not accepted")
         return super().attest(network, att)
 
-    def _poll_status_list(self, url: str) -> dict:
-        """FAIL-CLOSED: if the list is unreachable and no cached copy exists, raise."""
+    def _status_list_token(self, uri: str) -> tuple:
+        """FAIL-CLOSED: a fresh token, else a cached one that has not expired, else raise."""
         now = time.time()
-        if url in self._last_poll and now - self._last_poll[url] < self.status_list_poll:
-            return self._status_lists.get(url, {})
+        cached = self._status_tokens.get(uri)
+        if cached:
+            claims, fetched = cached[0][1], cached[1]
+            ttl = claims.get("ttl")
+            fresh_for = min(self.status_list_poll, ttl) if isinstance(ttl, (int, float)) and ttl > 0 else self.status_list_poll
+            if now - fetched < fresh_for and not _expired(claims, now):
+                return cached[0]
         try:
-            doc = fetch_registry(url)  # reuses http(s)-only, timeout, cap guards
+            raw = fetch_document(uri, accept="application/statuslist+jwt", max_bytes=_STATUS_LIST_MAX_BYTES,
+                                 what="status list")
+            parsed = parse_status_list_token(raw.decode("ascii", "replace"))
         except PlugError:
-            if url in self._status_lists:
-                return self._status_lists[url]  # serve stale cache
-            raise  # no cache -> fail closed
-        self._status_lists[url] = doc
-        self._last_poll[url] = now
-        return doc
+            if cached and not _expired(cached[0][1], now):
+                return cached[0]  # stale but unexpired copy
+            raise  # no usable copy -> fail closed
+        self._status_tokens[uri] = (parsed, now)
+        return parsed
+
+    @staticmethod
+    def _status_reference(att: Attestation) -> Optional[tuple[int, str]]:
+        if {"status_list_url", "status_list_index"} & set(att.meta):
+            raise PlugError("proof_invalid", "status list reference must be meta.status.status_list {idx, uri}")
+        status = att.meta.get("status")
+        if status is None:
+            return None
+        try:
+            ref = status["status_list"]
+            idx, uri = ref["idx"], ref["uri"]
+        except (KeyError, TypeError) as e:
+            raise PlugError("proof_invalid", "status list reference must be meta.status.status_list {idx, uri}") from e
+        if isinstance(idx, bool) or not isinstance(idx, int) or idx < 0 or not isinstance(uri, str):
+            raise PlugError("proof_invalid", "status list: idx must be a non-negative integer and uri a string")
+        return idx, uri
+
+    def _status_error(self, att: Attestation, data: dict) -> Optional[str]:
+        """None when the credential has no status reference or its status is VALID (0x00)."""
+        try:
+            ref = self._status_reference(att)
+            if ref is None:
+                return None
+            idx, uri = ref
+            try:
+                header, claims, signing_input, signature = self._status_list_token(uri)
+            except PlugError as e:
+                return f"{e.code}: status list unreachable: {e.message}"
+            now = time.time()
+            if header.get("typ") != "statuslist+jwt":
+                return "proof_invalid: status list token typ is not statuslist+jwt"
+            if claims.get("sub") != uri:
+                return "proof_invalid: status list token sub does not match the reference uri"
+            if not isinstance(claims.get("iat"), (int, float)) or isinstance(claims.get("iat"), bool):
+                return "proof_invalid: status list token has no iat"
+            if _expired(claims, now):
+                return "proof_invalid: status list token expired"
+            from ..suites import issuer_key, verify_jws
+            listed = (((data.get("trust_registry") or {}).get("keys") or {}).get(att.issuer)) or []
+            keys = [e["verification_method"] for e in listed]
+            own = issuer_key(att.issuer)
+            if own and own.startswith("did:key:"):
+                keys.append(own)
+            kid = header.get("kid")
+            named = [k for k in keys if kid in (k, k.split("#", 1)[0])]
+            signer = next((k for k in (named or keys)
+                           if verify_jws(signing_input, signature, header.get("alg", ""), k)), None)
+            if signer is None:
+                return "proof_invalid: status list token is not signed by a key of the issuer"
+            _, err = registry_key_status(data, att.issuer, signer, datetime.fromtimestamp(now, timezone.utc))
+            if err:
+                return f"{err} (status list token)"
+            bits, array = decode_status_list(claims.get("status_list"))
+            value = status_at(bits, array, idx)
+        except PlugError as e:
+            return f"{e.code}: {e.message}"
+        if value == 0:
+            return None
+        return f"proof_invalid: {_STATUS_NAMES.get(value, f'status 0x{value:02x}')} via status list"
 
     def verify(self, att: Attestation, network: str, trust_registry=None) -> Receipt:
         net = network or "default"
@@ -88,17 +221,7 @@ class EudiAdapter(InMemoryAdapter):
         err = anchor_error(self._store, net, att)
         if err:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
-        # Token Status List check if a status list URL is in meta
-        sl_url = att.meta.get("status_list_url")
-        if sl_url:
-            try:
-                sl = self._poll_status_list(sl_url)
-            except PlugError as e:
-                return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data,
-                               error=f"{e.code}: status list unreachable: {e.message}")
-            idx = att.meta.get("status_list_index")
-            if idx is not None and isinstance(sl.get("bits"), str):
-                if idx < len(sl["bits"]) and sl["bits"][idx] == "1":
-                    return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data,
-                                   error="proof_invalid: revoked via status list")
+        err = self._status_error(att, data)
+        if err:
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
         return check_signature(att, net, data)
