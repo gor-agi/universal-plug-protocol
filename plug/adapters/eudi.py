@@ -14,7 +14,7 @@ from typing import Any, Optional
 from ..core import (
     Attestation, PlugError, Receipt, StateRef, Status, SPEC_VERSION,
 )
-from .base import InMemoryAdapter, fetch_registry, resolve_trust_registry
+from .base import InMemoryAdapter, check_signature, fetch_registry, resolve_trust_registry
 
 _DEFAULT_STATUS_LIST_POLL = 300  # 5 minutes
 
@@ -67,7 +67,8 @@ class EudiAdapter(InMemoryAdapter):
         net = network or "default"
         # EUDI: resolve ETSI trusted lists first if configured and no explicit registry
         if self.trusted_lists and not trust_registry:
-            all_issuers, all_keys = [], []
+            all_issuers: list = []
+            all_keys: dict[str, list] = {}
             for url in self.trusted_lists:
                 try:
                     doc = fetch_registry(url)

@@ -158,10 +158,10 @@ def test_eudi_status_list_revocation():
                       issuer="did:eudi:eudi:alice", issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                       proof={"alg": "signature", "sig": "0x1", "verification_method": "0x2"},
                       meta={"status_list_url": "http://127.0.0.1:1/status.json", "status_list_index": 0})
-    # unreachable status list -> poll fails open (returns empty), verify proceeds to alg check
+    # unreachable status list with no cached copy -> fail closed before the signature check
     v = p.check(att)
     assert v["valid"] is False
-    assert "unverifiable" in (v["receipt"].error or "")
+    assert "status list unreachable" in (v["receipt"].error or "")
 
 
 def test_eudi_subscribe_delivers():

@@ -10,10 +10,13 @@ import json
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
-from ..core import PlugError, Receipt, SPEC_VERSION, StateRef, Status, parse_time
+from ..core import (
+    Adapter, Attestation, Identity, PlugError, Receipt, SPEC_VERSION, StateRef, Status,
+    parse_time, sha256_hex,
+)
 
 _REGISTRY_TIMEOUT = 5
 _REGISTRY_MAX_BYTES = 64 * 1024

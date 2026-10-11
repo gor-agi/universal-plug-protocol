@@ -81,7 +81,7 @@ class OracleAdapter(InMemoryAdapter):
 
         r = super().attest(net, att)
         # attach oracle-specific fields to the stored record
-        tx = r.ref.address
+        tx = r.state_ref.address
         self._store[tx]["value"] = val
         self._store[tx]["issued_at"] = att.issued_at
         return r
