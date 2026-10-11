@@ -10,7 +10,7 @@ pytest.importorskip("Crypto")
 
 from plug import suites
 from plug.adapters.eudi import EudiAdapter
-from plug.core import Attestation, Plug, sha256_hex
+from plug.core import Attestation, Plug, sha256_hex, statement_hash
 
 
 def iso(dt):
@@ -21,16 +21,18 @@ NOW = datetime.now(timezone.utc)
 ISSUER = "did:web:pid-provider.example"  # a DID method no adapter resolves on its own
 
 
-def eudi_with(subject):
+def eudi_with(subject, issued=NOW):
     p = Plug()
     p.register_adapter("eudi", EudiAdapter())
     p.open("eudi", {"scheme": "raw", "material": "w", "subject": "holder"})
-    p.attest("eudi", Attestation(subject, "identity.pid", ISSUER, iso(NOW)))
+    p.attest("eudi", Attestation(subject, "identity.pid", ISSUER, iso(issued)))
     return p
 
 
-def signed(key, subject):
-    return Attestation(subject, "identity.pid", ISSUER, iso(NOW), proof=suites.sign("ecdsa-p256", key, subject))
+def signed(key, subject, issued=NOW):
+    att = Attestation(subject, "identity.pid", ISSUER, iso(issued))
+    att.proof = suites.sign("ecdsa-p256", key, statement_hash(att))
+    return att
 
 
 def test_registry_keys_make_an_unresolvable_issuer_verifiable():
@@ -55,12 +57,12 @@ def test_rotated_or_revoked_key_fails_without_an_anchored_time():
         {"verification_method": vm(old), "valid_until": iso(NOW - timedelta(days=1))},
         {"verification_method": vm(new), "valid_from": iso(NOW - timedelta(days=1))}]}}
     subject = sha256_hex(b"claims backdated issuance")
-    p = eudi_with(subject)
-    backdated = signed(old, subject)
-    backdated.issued_at = iso(NOW - timedelta(days=30))  # a claim, not evidence
+    month_ago = NOW - timedelta(days=30)
+    p = eudi_with(subject, month_ago)
+    backdated = signed(old, subject, month_ago)  # issued_at is signed, but it is a claim, not evidence
     v = p.check(backdated, network="eudi", trust_registry=registry)
     assert v["receipt"].error.startswith("proof_invalid: key not valid at")
-    assert p.check(signed(new, subject), network="eudi", trust_registry=registry)["valid"] is True
+    assert p.check(signed(new, subject, month_ago), network="eudi", trust_registry=registry)["valid"] is True
 
 
 def test_ledger_judges_the_key_at_anchored_time():
@@ -75,8 +77,7 @@ def test_ledger_judges_the_key_at_anchored_time():
     p.open("sepolia", {"scheme": "raw", "material": acct.key.hex()})
     r = p.prove(b"signed while the key was valid", "doc.sha256")
     anchored = datetime.fromtimestamp(w3.eth.get_block(r.data["block"])["timestamp"], timezone.utc)
-    att = Attestation(r.data["subject_hash"], "doc.sha256", r.data["issuer"], iso(NOW),
-                      proof=r.data["proof"], anchor=r.state_ref)
+    att = Attestation.from_receipt(r)
     revoked_later = {"issuers": [r.data["issuer"]], "keys": {r.data["issuer"]: [
         {"verification_method": acct.address, "valid_until": iso(anchored + timedelta(seconds=1))}]}}
     assert p.check(att, trust_registry=revoked_later)["valid"] is True, "valid when anchored, revoked since"
@@ -97,13 +98,13 @@ def test_malformed_registry_keys_are_rejected():
 
 def test_ledger_registry_keys_are_enforced():
     from plug.adapters.base import check_signature, resolve_trust_registry
-    from plug.core import Receipt, StateRef, Status
+    from plug.core import SPEC_VERSION, Receipt, StateRef, Status
     key = suites.generate_key("ecdsa-p256")
     vm = suites.sign("ecdsa-p256", key, "00" * 32)["verification_method"]
     revoked = {ISSUER: [{"verification_method": vm, "valid_until": iso(NOW - timedelta(days=1))}]}
 
     def query(record):
-        return lambda ref: Receipt("0.2.0", "query", Status.OK, ref.network, ref, record)
+        return lambda ref: Receipt(SPEC_VERSION, "query", Status.OK, ref.network, ref, record)
 
     ref = StateRef("ledger", "registry-1", "asset")
     att = signed(key, sha256_hex(b"pid"))

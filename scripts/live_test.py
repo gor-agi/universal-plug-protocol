@@ -58,10 +58,7 @@ def main():
     if not proof:
         print("verify failed: attest receipt has no proof")
         sys.exit(1)
-    att = Attestation(subject_hash=r.data["subject_hash"], fact_type=FactType.SENSOR_READING,
-                      issuer=plug.active().credential_subject,
-                      issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                      proof=proof, anchor=r.state_ref)
+    att = Attestation.from_receipt(r)
     v = plug.check(att)
     print(f"verify valid: {v['valid']}")
     print(f"verify data:  {v['receipt'].data}")
@@ -71,11 +68,11 @@ def main():
 
     # 4b. A signature over a hash that was never anchored must not verify.
     from plug.adapters.live import sign_subject
-    from plug.core import sha256_hex
+    from dataclasses import replace
+    from plug.core import sha256_hex, statement_hash
     loose = sha256_hex(f"never anchored {time.time()}")
-    unanchored = Attestation(subject_hash=loose, fact_type=FactType.SENSOR_READING, issuer=att.issuer,
-                             issued_at=att.issued_at, proof=sign_subject(loose, os.environ["SEPOLIA_PRIVATE_KEY"]),
-                             anchor=r.state_ref)
+    unanchored = replace(att, subject_hash=loose)
+    unanchored.proof = sign_subject(statement_hash(unanchored), os.environ["SEPOLIA_PRIVATE_KEY"])
     u = plug.check(unanchored)
     print(f"unanchored rejected: {not u['valid']} ({u['receipt'].error})")
     if u["valid"]:

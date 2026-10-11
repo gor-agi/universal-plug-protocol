@@ -11,7 +11,9 @@ from hexbytes import HexBytes
 from web3.datastructures import AttributeDict
 
 from plug.adapters.live import LiveAdapter, sign_subject
-from plug.core import Attestation, Plug, PlugError, StateRef, Status, sha256_hex
+from dataclasses import replace
+
+from plug.core import Attestation, Plug, PlugError, StateRef, Status, sha256_hex, statement_hash
 
 
 def _norm(h) -> str:
@@ -41,6 +43,7 @@ class _FakeEth:
         self.block_number = 100
         self.finalized = 90
         self.revert_data = set()
+        self.revert_all = False
         self.chain_id = 11155111
         self.gas_price = 1
 
@@ -59,7 +62,7 @@ class _FakeEth:
         self.nonces[tx["from"]] = self.nonces.get(tx["from"], 0) + 1
         key = _norm(tx_hash)
         self.txs[key] = AttributeDict({"from": tx["from"], "to": tx["to"], "input": HexBytes(tx["data"])})
-        self.receipts[key] = AttributeDict({"status": 0 if tx["data"] in self.revert_data else 1,
+        self.receipts[key] = AttributeDict({"status": 0 if self.revert_all or tx["data"] in self.revert_data else 1,
                                            "blockNumber": self.block_number, "gasUsed": 21512, "logs": []})
         return HexBytes(tx_hash)
 
@@ -98,12 +101,12 @@ def setup(*keys):
     return p, adapter, w3, sessions
 
 
-def attestation_from(p, r, **overrides):
-    fields = dict(subject_hash=r.data["subject_hash"], fact_type=r.data["fact_type"],
-                  issuer=r.data["issuer"], issued_at="2026-10-10T00:00:00Z",
-                  proof=dict(r.data["proof"]), anchor=r.state_ref)
-    fields.update(overrides)
-    return Attestation(**fields)
+def attestation_from(p, r, signer=None, **overrides):
+    """The receipt's attestation with overrides; signer re-signs the changed statement with that key."""
+    att = replace(Attestation.from_receipt(r), **overrides)
+    if signer:
+        att.proof = sign_subject(statement_hash(att), signer)
+    return att
 
 
 def test_anchored_attestation_verifies_with_time_and_finality():
@@ -122,10 +125,10 @@ def test_signed_but_never_anchored_is_rejected():
     p, _, _, _ = setup(ALICE)
     r = p.prove(b"real", "doc.sha256")
     loose = sha256_hex(b"never anchored")
-    att = attestation_from(p, r, subject_hash=loose, proof=sign_subject(loose, ALICE))
+    att = attestation_from(p, r, signer=ALICE, subject_hash=loose)
     v = p.check(att)
     assert v["valid"] is False
-    assert v["receipt"].error == "proof_invalid: anchor does not carry the subject hash"
+    assert v["receipt"].error == "proof_invalid: anchor does not carry the statement"
     missing = p.check(attestation_from(p, r, anchor=None))
     assert missing["receipt"].error == "proof_invalid: missing anchor"
 
@@ -134,7 +137,9 @@ def test_issuer_impersonation_is_rejected_even_when_registry_lists_victim():
     p, _, _, (alice_sid, bob_sid) = setup(ALICE, BOB)
     alice_did = f"did:plug:eip155:11155111:{Account.from_key(ALICE).address}"
     r = p.prove(b"bob's claim", "doc.sha256")  # active session is bob
-    att = attestation_from(p, r, issuer=alice_did)
+    relabeled = p.check(attestation_from(p, r, issuer=alice_did), trust_registry={"issuers": [alice_did]})
+    assert relabeled["receipt"].error == "proof_invalid: signer mismatch"
+    att = attestation_from(p, r, signer=BOB, issuer=alice_did)
     v = p.check(att, trust_registry={"issuers": [alice_did]})
     assert v["valid"] is False
     assert v["receipt"].error == "proof_invalid: issuer is not bound to the signing key"
@@ -145,9 +150,7 @@ def test_anchor_from_another_key_is_rejected():
     bob_r = p.prove(b"shared fact", "doc.sha256")
     p.use(alice_sid)
     alice_did = p.active().credential_subject
-    att = Attestation(subject_hash=bob_r.data["subject_hash"], fact_type="doc.sha256", issuer=alice_did,
-                      issued_at="2026-10-10T00:00:00Z",
-                      proof=sign_subject(bob_r.data["subject_hash"], ALICE), anchor=bob_r.state_ref)
+    att = attestation_from(p, bob_r, signer=ALICE, issuer=alice_did)
     v = p.check(att)
     assert v["valid"] is False
     assert v["receipt"].error == "proof_invalid: anchor was sent by another key"
@@ -187,10 +190,13 @@ def test_issuer_on_another_network_is_rejected():
     r = p.prove(b"x", "doc.sha256")
     address = Account.from_key(ALICE).address
     for other in (f"did:pkh:eip155:1:{address}", f"did:plug:mainnet:{address}"):
-        v = p.check(attestation_from(p, r, issuer=other))
+        v = p.check(attestation_from(p, r, signer=ALICE, issuer=other))
         assert v["receipt"].error == "proof_invalid: issuer DID names another network", other
     for same in (f"did:pkh:eip155:11155111:{address}", f"did:plug:sepolia:{address}"):
-        assert p.check(attestation_from(p, r, issuer=same))["valid"] is True, same
+        att = Attestation(subject_hash=sha256_hex(same), fact_type="doc.sha256", issuer=same,
+                          issued_at="2026-10-10T00:00:00Z")
+        anchored = p.attest("sepolia", att)
+        assert p.check(Attestation.from_receipt(anchored))["valid"] is True, same
 
 
 def test_finality_turns_final_once_block_is_finalized():
@@ -203,7 +209,7 @@ def test_finality_turns_final_once_block_is_finalized():
 
 def test_reverted_anchor_carries_no_proof():
     p, _, w3, _ = setup(ALICE)
-    w3.eth.revert_data.add("0x" + sha256_hex(b"doomed"))
+    w3.eth.revert_all = True
     r = p.prove(b"doomed", "doc.sha256")
     assert r.status == Status.REJECTED
     assert "proof" not in r.data
@@ -226,7 +232,11 @@ def test_bridge_anchors_commitment_on_target_and_checks_both_sides():
     br = p.bridge(src.state_ref, "chain-b")
     assert br.status == Status.OK and br.network == "chain-b" and br.state_ref.network == "chain-b"
     on_b = b.w3.eth.get_transaction(br.state_ref.address[5:])
-    assert on_b["input"].hex().removeprefix("0x") == bridge_commitment(src.state_ref)
+    a = br.data["attestation"]
+    assert a["subject_hash"] == bridge_commitment(src.state_ref)
+    target_att = Attestation(subject_hash=a["subject_hash"], fact_type=a["fact_type"], issuer=a["issuer"],
+                             issued_at=a["issued_at"], meta=a["meta"], hash_alg=a["hash_alg"])
+    assert on_b["input"].hex().removeprefix("0x") == statement_hash(target_att)
     v = p.check(br)
     assert v["valid"] is True, v["receipt"].error
     target = v["receipt"].data["target"]
@@ -253,3 +263,14 @@ def test_bridge_without_target_adapter_stays_pending_on_source():
     p.use(p.list_sessions()[0].session_id)
     r = p.bridge(src.state_ref, "chain-z")
     assert r.status == Status.PENDING and r.network == "chain-a" and r.state_ref.network == "chain-a"
+
+
+def test_repeated_bridge_receipt_still_verifies():
+    from unittest import mock
+    p, a, b, src = two_chains()
+    first = p.bridge(src.state_ref, "chain-b")
+    with mock.patch("plug.core.time.strftime", return_value="2030-01-01T00:00:00Z"):
+        again = p.bridge(src.state_ref, "chain-b")
+    for br in (first, again):
+        v = p.check(br)
+        assert v["valid"] is True, v["receipt"].error

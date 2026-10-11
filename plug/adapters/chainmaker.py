@@ -2,7 +2,7 @@
 # Copyright Contributors to the Universal Plug Protocol project
 """ChainMaker adapter: a permissioned ledger with certificate-based membership.
 
-Subject hashes are anchored by calling a minimal EVM contract whose runtime is
+Statement hashes are anchored by calling a minimal EVM contract whose runtime is
 a single STOP; the evidence is the signed, block-included transaction payload.
 The chain authenticates each sender's certificate against its trust roots, and
 the adapter binds that certificate's public key to the attestation issuer.
@@ -16,7 +16,9 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .. import suites
-from ..core import Adapter, Attestation, Identity, PlugError, Receipt, StateRef, Status, SPEC_VERSION, parse_time
+from ..core import (
+    Adapter, Attestation, Identity, PlugError, Receipt, StateRef, Status, SPEC_VERSION, parse_time, statement_hash,
+)
 from .base import LoggingAdapter, registry_key_status, resolve_trust_registry
 
 # Creation code: PUSH1 01 DUP1 PUSH1 0b PUSH1 00 CODECOPY PUSH1 00 RETURN, then runtime STOP.
@@ -163,13 +165,14 @@ class ChainMakerAdapter(LoggingAdapter, Adapter):
 
     def attest(self, network: str, att: Attestation) -> Receipt:
         private, public, signer = self._member_for(att.issuer)
-        proof = suites.sign("ecdsa-p256", private, att.subject_hash)
-        tx_id, ok, message = self._send(signer, anchor_calldata(att.subject_hash))
+        statement = statement_hash(att)
+        proof = suites.sign("ecdsa-p256", private, statement)
+        tx_id, ok, message = self._send(signer, anchor_calldata(statement))
         ref = StateRef(network, _TX_PREFIX + tx_id, "event")
         found = self.query(ref)
         rec = {"op": "attest", "tx": ref.address, "block": found.data["block"],
-               "subject_hash": att.subject_hash, "fact_type": att.fact_type, "issuer": att.issuer,
-               "role": att.role.value if att.role else None, "seq": att.meta.get("_seq", 0),
+               "subject_hash": att.subject_hash, "statement_hash": statement, "fact_type": att.fact_type,
+               "issuer": att.issuer, "role": att.role.value if att.role else None, "seq": att.meta.get("_seq", 0),
                "org_id": found.data["org_id"], "finality": found.data["finality"]}
         if ok:
             att.proof = proof
@@ -216,7 +219,8 @@ class ChainMakerAdapter(LoggingAdapter, Adapter):
 
         if att.proof.get("alg") != "ecdsa-p256":
             return reject("proof_invalid: unsupported alg")
-        ok, method = suites.verify(att.subject_hash, att.proof)
+        statement = statement_hash(att)
+        ok, method = suites.verify(statement, att.proof)
         if not ok:
             return reject(method)
         parsed = suites.parse_account_did(att.issuer)
@@ -238,8 +242,8 @@ class ChainMakerAdapter(LoggingAdapter, Adapter):
             return reject("proof_invalid: anchor did not call the anchor contract")
         if found.data["sender"] != method:
             return reject("proof_invalid: anchor was sent by another key")
-        if found.data["calldata"] != anchor_calldata(att.subject_hash):
-            return reject("proof_invalid: anchor does not carry the subject hash")
+        if found.data["calldata"] != anchor_calldata(statement):
+            return reject("proof_invalid: anchor does not carry the statement")
         _, err = registry_key_status(data, att.issuer, method, parse_time(found.data["anchored_at"]))
         if err:
             return reject(err)

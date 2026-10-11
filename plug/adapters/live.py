@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .. import suites
-from ..core import Adapter, Attestation, Identity, Receipt, StateRef, Status, PlugError, SPEC_VERSION
+from ..core import Adapter, Attestation, Identity, Receipt, StateRef, Status, PlugError, SPEC_VERSION, statement_hash
 from .base import LoggingAdapter, registry_key_status, resolve_trust_registry
 
 try:
@@ -57,7 +57,7 @@ def select_stream_events(filt, tx_event: Optional[dict], logs: list) -> list:
 
 
 def sign_subject(subject_hash: str, private_key: str) -> dict:
-    """Sign a 32-byte subject hash. The verification method is the signing address."""
+    """Sign a 32-byte hash, an attestation's statement hash in practice. The verification method is the signing address."""
     if not _WEB3_AVAILABLE:
         raise PlugError("not_found", "web3 not installed; pip install web3")
     return suites.sign("ecdsa-secp256k1", private_key, subject_hash)
@@ -206,15 +206,16 @@ class LiveAdapter(LoggingAdapter, Adapter):
         return Receipt(SPEC_VERSION, "identify", Status.OK, network, data=rec)
 
     def attest(self, network: str, att: Attestation) -> Receipt:
-        # A 0-wei self-transaction carries the subject hash: an independently checkable anchor, no contract.
+        # A 0-wei self-transaction carries the statement hash: an independently checkable anchor, no contract.
         address, key = self._key_for(att.issuer)
-        proof = sign_subject(att.subject_hash, key)
-        tx_hex, receipt = self._send(address, key, "0x" + att.subject_hash)
+        statement = statement_hash(att)
+        proof = sign_subject(statement, key)
+        tx_hex, receipt = self._send(address, key, "0x" + statement)
         status, err = chain_status(receipt.status)
         ref = StateRef(network, tx_hex, "event")
         rec = {"op": "attest", "tx": tx_hex, "block": receipt.blockNumber,
-               "subject_hash": att.subject_hash, "fact_type": att.fact_type, "issuer": att.issuer,
-               "role": att.role.value if att.role else None,
+               "subject_hash": att.subject_hash, "statement_hash": statement, "fact_type": att.fact_type,
+               "issuer": att.issuer, "role": att.role.value if att.role else None,
                "seq": att.meta.get("_seq", 0), "gas_used": receipt.gasUsed,
                "chain_status": int(receipt.status), "finality": self._finality(receipt.blockNumber)}
         if status == Status.OK:
@@ -255,7 +256,8 @@ class LiveAdapter(LoggingAdapter, Adapter):
         alg = att.proof.get("alg", "")
         if alg not in ("ecdsa-secp256k1", "signature"):
             return reject("proof_invalid: unsupported alg")
-        ok, detail = check_proof(att.subject_hash, att.proof)
+        statement = statement_hash(att)
+        ok, detail = check_proof(statement, att.proof)
         if not ok:
             if str(detail).startswith("proof_invalid"):
                 return reject(detail)
@@ -278,8 +280,8 @@ class LiveAdapter(LoggingAdapter, Adapter):
             return reject("proof_invalid: anchor transaction failed")
         if Web3.to_checksum_address(found.data["from"]) != detail:
             return reject("proof_invalid: anchor was sent by another key")
-        if found.data["data"] != "0x" + att.subject_hash.lower():
-            return reject("proof_invalid: anchor does not carry the subject hash")
+        if found.data["data"] != "0x" + statement:
+            return reject("proof_invalid: anchor does not carry the statement")
         stamp = self.w3.eth.get_block(found.data["block"])["timestamp"]
         anchored = datetime.fromtimestamp(stamp, timezone.utc)
         _, err = registry_key_status(data, att.issuer, detail, anchored)

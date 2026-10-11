@@ -1,6 +1,6 @@
 # Universal Plug Protocol Specification
 
-Version 0.2.0
+Version 0.3.0
 
 UPP defines a universal interface for attestations and identity across heterogeneous networks. Eight core operations — connect, identify, attest, query, verify, settle, bridge, subscribe — plus five session operations. Three user-facing verbs: prove, check, watch.
 
@@ -19,7 +19,7 @@ This document is the canonical reference. The implementation must match it; wher
 
 - **Identity** — did (string), method (string: key, web, or network-native). DID-method guidance: per-presentation pseudonyms are recommended for privacy-sensitive deployments; core is agnostic, adapters and DID methods own the mechanism.
 - **Credential** — issuer, subject, hash, claims, proof. Maps to W3C Verifiable Credentials where applicable.
-- **Attestation** — subject_hash (hex, 32 bytes), hash_alg (sha-256 default; sha3-256, sm3), fact_type (open vocabulary, canonicalized to lowercase dotted), issuer (DID), issued_at / expires_at (ISO-8601), proof ({alg, sig, verification_method}), optional role tag, optional meta. Optional salted-hash structure for selective disclosure: {salt, hash} pairs alongside the subject hash, enabling verifiers to check disclosed fields without revealing undisclosed ones. No new op — payload schema only. Optional anchor (StateRef): where the subject hash was recorded. Ledger adapters set it on a successful attest and require it on verify.
+- **Attestation** — subject_hash (hex, 32 bytes), hash_alg (sha-256 default; sha3-256, sm3), fact_type (open vocabulary, canonicalized to lowercase dotted), issuer (DID), issued_at / expires_at (ISO-8601), proof ({alg, sig, verification_method}), optional role tag, optional meta. Optional salted-hash structure for selective disclosure: {salt, hash} pairs alongside the subject hash, enabling verifiers to check disclosed fields without revealing undisclosed ones. No new op — payload schema only. Optional anchor (StateRef): where the attestation's statement hash was recorded. Ledger adapters set it on a successful attest and require it on verify. Meta keys beginning with `_` are implementation-internal: they are never signed and verifiers ignore them.
 - **StateRef** — network, address, kind (asset, ownership, event, market).
 - **Receipt** — spec_version (semver), op, status (ok, pending, rejected, error), network, optional state_ref, data, optional error, seq. Canonical serialization is RFC 8785 (JSON Canonicalization Scheme); no library is required to parse. Ledger adapters report finality inside data as `finality: {kind: final | probabilistic, confirmations}`; the receipt shape does not change.
 - **NetworkKind** — advisory label only (public, permissioned, enterprise, sovereign). Not enforced by core. Sovereign is the umbrella category: a public chain is sovereign in consensus, a national fabric in governance, Holochain per-agent, an enterprise chain within its org.
@@ -38,13 +38,27 @@ The hash algorithm is deployment configuration, never a core change: sha-256 by 
 
 A plain hash of low-entropy data — a name, an email, an ID number — can be reversed by hashing guesses, so it remains personal data and cannot be erased from a ledger. With `commitment = salted`, prove anchors H(salt ‖ fact) under a fresh 32-byte salt. The salt is returned to the caller in the receipt and never passed to an adapter or logged. Whoever holds the fact and the salt can open the commitment; nobody else can link it. Deleting the salt and the fact leaves the anchor unlinkable, which is how a ledger deployment honours erasure (GDPR Art. 17, EDPB Guidelines 02/2025) without rewriting history. Only the hash crosses a border; the fact and the salt stay where the data lives. Idempotent retries key on the unsalted digest in memory only.
 
+## Statement
+
+A proof signs, and a ledger anchors, the attestation's **statement**: the subject hash together with every label a verifier acts on.
+
+```
+statement      = {"plug.statement": {"subject_hash", "hash_alg", "fact_type", "issuer", "issued_at",
+                                     "expires_at", "role", "meta", "disclosure"}}
+statement_hash = H(JCS(statement))   under the attestation's hash_alg
+```
+
+`subject_hash` is lowercase hex; `expires_at` and `role` are `null` when absent; `meta` omits keys beginning with `_`; `disclosure` is `[]` when absent. Because every label is inside the signed statement, an attestation cannot be relabeled: a halt cannot be presented as a resume, a document hash as an agent action, or one model family's review as another's, without invalidating the proof. `issued_at` is signed as the issuer's claim; it is still never used as the time a key is judged at (see verify).
+
+A receipt from attest carries every statement field, so an implementation can rebuild the attestation it stands for exactly (`Attestation.from_receipt` in the reference implementation).
+
 ## Signature suites
 
-Every suite signs the same message, the 32-byte subject hash, and applies its own standard to it:
+Every suite signs the same message, the 32-byte statement hash, and applies its own standard to it:
 
 | alg | standard | verification_method |
 | --- | --- | --- |
-| ecdsa-secp256k1 | ECDSA, subject hash as digest (Ethereum-compatible) | 0x account address |
+| ecdsa-secp256k1 | ECDSA, statement hash as digest (Ethereum-compatible) | 0x account address |
 | ed25519 | PureEdDSA, RFC 8032 | did:key |
 | ecdsa-p256 | ECDSA P-256 with SHA-256 (ES256), r‖s | did:key |
 | sm2-sm3 | SM2 with SM3, distinguishing ID 1234567812345678 (GB/T 32918.2, GM/T 0009), r‖s | did:key |
@@ -53,7 +67,7 @@ A proof is valid only when its signature verifies and the issuer DID names the s
 
 ## Conformance
 
-`spec/vectors/` holds language-neutral test vectors. `jcs.json` (canonical form and digests) is generated by an independent implementation (`generate_jcs.mjs`, Node). `rfc9162.json` holds Merkle tree and inclusion vectors from an independent RFC 9162 implementation. `protocol.json` holds salted, bridge, and batch commitments, inclusion proofs, the reserved commitment domain, and Ed25519 and P-256 proofs with issuer binding, produced by the reference implementation and verified from this specification alone by `verify_protocol.mjs` (Node standard library). An implementation conforms when it reproduces every canonical form, digest, and commitment there and reaches the same verdict on every proof. Signature suites are cross-checked against OpenSSL 3 in both directions.
+`spec/vectors/` holds language-neutral test vectors. `jcs.json` (canonical form and digests) is generated by an independent implementation (`generate_jcs.mjs`, Node). `rfc9162.json` holds Merkle tree and inclusion vectors from an independent RFC 9162 implementation. `protocol.json` holds salted, bridge, and batch commitments, inclusion proofs, statements and their hashes, the reserved commitment domain, and Ed25519 and P-256 proofs over statements with issuer binding and relabeling cases, produced by the reference implementation and verified from this specification alone by `verify_protocol.mjs` (Node standard library). An implementation conforms when it reproduces every canonical form, digest, and commitment there and reaches the same verdict on every proof. Signature suites are cross-checked against OpenSSL 3 in both directions.
 
 ## Eight core ops
 
@@ -63,7 +77,7 @@ A proof is valid only when its signature verifies and the issuer DID names the s
 4. **query** — read ledger state back via StateRef.
 5. **verify** — check someone else's attestation against that network's rules. Never trusts the issuer. Optional trust_registry parameter: a URL, an inline registry document, or a StateRef pointing at a published issuer registry. Core passes it through; adapters resolve it. Not enforced by core.
 
-   On a ledger network, verify is valid only when all of these hold: the signature recovers to `verification_method`; the issuer DID names that same key; the anchor exists on this network, succeeded, was sent by that key, and carries the subject hash. The receipt reports the anchor block, its timestamp as `anchored_at`, and finality. A signature alone proves possession of a key, not that a fact was recorded or when.
+   On a ledger network, verify is valid only when all of these hold: the signature recovers to `verification_method`; the issuer DID names that same key; the anchor exists on this network, succeeded, was sent by that key, and carries the statement hash. The receipt reports the anchor block, its timestamp as `anchored_at`, and finality. A signature alone proves possession of a key, not that a fact was recorded or when.
 
 A URL registry is a JSON object `{"issuers": ["did:...", ...]}`. `issuers` is a non-empty list of strings. Adapters fetch it with HTTP or HTTPS only, a 5 second timeout, a 64 KiB cap, and no redirect off http(s). The attestation issuer must be in that list. A StateRef registry is resolved by query. The same membership check applies when the queried record contains an `issuers` list, and the same key rules apply when it contains `keys`.
 
@@ -86,9 +100,9 @@ Rules: explicit network beats active session; neither exists means error, not gu
 - **check(target, network?)** → {valid: bool, receipt}. Target is an Attestation, StateRef, or DID string.
 - **watch(target, filter?)** → stream handle. Target is a StateRef.
 
-**Batch anchoring.** `prove_batch(facts, fact_type, network?, meta?)` is prove applied to many facts with one anchor; it is not a new operation. The facts' subject hashes (salted individually under `commitment = salted`) are the leaves of an RFC 9162 Merkle tree. The anchored subject is the batch commitment H(JCS({"plug.batch": {"root": root, "size": size}})), attested once as fact type `plug.batch` and signed once. Each fact's attestation carries `inclusion: {tree: "rfc9162", index, size, path, root}`, and its proof and anchor are those of the batch commitment. check verifies the inclusion proof by the RFC 9162 algorithm, recomputes the batch commitment from root and size, then verifies it under the network's rules. A retried salted batch reuses the first call's salts, held in memory only, so it reproduces the same anchor. Cost per fact falls with batch size, and no aggregation server is involved: the issuer batches its own facts.
+**Batch anchoring.** `prove_batch(facts, fact_type, network?, meta?)` is prove applied to many facts with one anchor; it is not a new operation. The facts' subject hashes (salted individually under `commitment = salted`) are the leaves of an RFC 9162 Merkle tree. The anchored subject is the batch commitment H(JCS({"plug.batch": {"root": root, "size": size}})), attested once as fact type `plug.batch` with meta `{...caller meta, batch_size, batch_fact_type}` and signed once. Each fact's attestation has the batch's issuer, issued_at, and caller meta, the facts' fact_type, and `inclusion: {tree: "rfc9162", index, size, path, root}`; its proof and anchor are those of the batch statement. check verifies the inclusion proof by the RFC 9162 algorithm, recomputes the batch commitment from root and size, rebuilds the batch statement from the fact's attestation (fact type `plug.batch`, `batch_fact_type` set to the fact's type), then verifies it under the network's rules. A fact's type is therefore signed through the batch statement. A retried salted batch reuses the first call's salts, held in memory only, so it reproduces the same anchor. Cost per fact falls with batch size, and no aggregation server is involved: the issuer batches its own facts.
 
-**Reserved commitment domain.** Bridge and batch commitments are canonical JSON objects keyed `plug.bridge` and `plug.batch`. prove and prove_batch refuse any fact whose bytes begin with `{"plug.`, so no proven fact can be presented as one of these commitments, and a single-fact anchor can never pass as a batch root.
+**Reserved commitment domain.** Bridge and batch commitments and statements are canonical JSON objects keyed `plug.bridge`, `plug.batch`, and `plug.statement`. prove and prove_batch refuse any fact whose bytes begin with `{"plug.`, so no proven fact can be presented as one of these commitments, and a single-fact anchor can never pass as a batch root.
 
 Transports (REST, MCP, CLI, SDKs, webhooks, queues) are thin adapters over these three. The user picks the pipe. The reference MCP transport (`plug.mcp_server`) exposes prove, prove_batch, check, watch, and networks as tools. It holds all keys server-side and accepts no credential material from the model, and it accepts trust registries only inline or by name from a server-side allowlist. The model does not choose what the server's key vouches for: fact types under `agent.`, `control.`, and `incident.` are refused unless the operator allowlists them, `plug.` types are always refused, and `model_family` and `model_id` are set by the server, never taken from the model.
 
@@ -98,7 +112,7 @@ Nine codes: auth_failed, not_found, not_authorized, unsupported_op, proof_invali
 
 ## Idempotency invariant
 
-Receipt hash covers spec_version, op, network, subject_hash, fact_type, issuer, role — never seq. The same subject attested by a different issuer, or under a different fact type, is a different attestation. The plug maintains a 24-hour idempotency cache keyed on that hash. Only ok and pending receipts are cached; a rejected or error receipt is retried on the next call. On a cache hit, the cached receipt is cloned and stamped with the call's fresh seq before return. Settle and bridge bypass the cache by design: they have no subject hash to key on. This is documented, not implicit.
+Receipt hash covers spec_version, op, network, subject_hash, fact_type, issuer, role — never seq. The same subject attested by a different issuer, or under a different fact type, is a different attestation. The plug maintains a 24-hour idempotency cache keyed on the statement (see Statement), so an attestation that differs in any signed label is a new attestation and is anchored. Two refinements: a salted prove keys on the unsalted digest, held in memory only; and where the plug itself sets issued_at (prove, prove_batch), the key leaves issued_at out, so a retry returns the first receipt with its original time. An attestation passed to attest is keyed on its full statement: the same content signed again at a later time is a new statement. Only ok and pending receipts are cached; a rejected or error receipt is retried on the next call. On a cache hit, the cached receipt is cloned and stamped with the call's fresh seq before return. Settle and bridge bypass the cache by design: they have no subject hash to key on, and a bridge's target attestation is keyed on its full statement. This is documented, not implicit.
 
 ## Agent oversight profile
 
@@ -137,7 +151,7 @@ A deployment profile for forecasting markets. Like the agent oversight profile, 
 
 Every adapter implements the eight core ops. Core exports no concrete backend. Adapters own: key management, RPC or gateway details, finality callbacks, optional persistence, and jurisdiction-specific resolution such as trust-list lookups or status-list polling.
 
-A ledger adapter anchors the subject hash in a transaction the ledger itself authenticates, and on verify confirms that the anchor exists, succeeded, carries exactly the subject hash, and was authorized by the key named in the proof. How the ledger authenticates its senders — account signatures on a public network, certificates checked against organizational trust roots on a permissioned one — is the adapter's concern; the guarantee reported to the caller is the same. The reference implementation includes one adapter of each kind, and `scripts/bridge_test.py` verifies a fact proven on one and referenced on the other.
+A ledger adapter anchors the statement hash in a transaction the ledger itself authenticates, and on verify confirms that the anchor exists, succeeded, carries exactly the statement hash, and was authorized by the key named in the proof. How the ledger authenticates its senders — account signatures on a public network, certificates checked against organizational trust roots on a permissioned one — is the adapter's concern; the guarantee reported to the caller is the same. The reference implementation includes one adapter of each kind, and `scripts/bridge_test.py` verifies a fact proven on one and referenced on the other.
 
 ## Oracle adapters
 
@@ -163,3 +177,4 @@ This appendix is not normative. It lists recurring problems in established attes
 | Hashes differ between implementations because serialization differs | JSON-based credential formats | RFC 8785 canonical form with independently generated conformance vectors |
 | A single operator or identity provider is a point of failure and control | centralized transparency logs, keyless signing | Any rail, issuer-held keys, and verification that trusts neither the issuer nor the operator |
 | An AI model attests to its own actions | agent frameworks with self-reported logs | Agent oversight profile: the harness signs, reviews come from another model family |
+| A signature covers a hash but not its labels, so a signed fact can be presented under another type, time, or issuer | detached-signature and hash-anchoring schemes | The proof signs and the ledger anchors the statement: subject hash, type, issuer, times, role, and meta together |

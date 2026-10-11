@@ -13,7 +13,9 @@ pytest.importorskip("Crypto")
 
 from plug import suites
 from plug.adapters.chainmaker import ChainMakerAdapter, anchor_calldata
-from plug.core import Attestation, Plug, Status, sha256_hex
+from dataclasses import replace
+
+from plug.core import Attestation, Plug, Status, sha256_hex, statement_hash
 
 CERTS = os.environ.get("PLUG_CHAINMAKER_CERTS", "")
 NODE = os.environ.get("PLUG_CHAINMAKER_NODE", "127.0.0.1:12301")
@@ -60,11 +62,12 @@ def chain():
     return p, adapter
 
 
-def attestation(r, **overrides):
-    fields = dict(subject_hash=r.data["subject_hash"], fact_type=r.data["fact_type"], issuer=r.data["issuer"],
-                  issued_at="2026-10-11T00:00:00Z", proof=dict(r.data["proof"]), anchor=r.state_ref)
-    fields.update(overrides)
-    return Attestation(**fields)
+def attestation(r, signer=None, **overrides):
+    """The receipt's attestation with overrides; signer re-signs the changed statement with that key."""
+    att = replace(Attestation.from_receipt(r), **overrides)
+    if signer:
+        att.proof = suites.sign("ecdsa-p256", signer, statement_hash(att))
+    return att
 
 
 def test_prove_and_check_on_a_permissioned_ledger(chain):
@@ -86,21 +89,22 @@ def test_unanchored_forged_and_impersonated_proofs_fail(chain):
     r = p.prove(b"real cargo manifest", "doc.sha256")
     client1_key = adapter._members[r.data["issuer"]][0]
     loose = sha256_hex(b"never anchored")
-    v = p.check(attestation(r, subject_hash=loose, proof=suites.sign("ecdsa-p256", client1_key, loose)))
-    assert v["receipt"].error == "proof_invalid: anchor does not carry the subject hash"
+    v = p.check(attestation(r, signer=client1_key, subject_hash=loose))
+    assert v["receipt"].error == "proof_invalid: anchor does not carry the statement"
 
     outsider = suites.generate_key("ecdsa-p256")
-    forged = suites.sign("ecdsa-p256", outsider, r.data["subject_hash"])
-    v = p.check(attestation(r, proof=forged))
+    v = p.check(attestation(r, signer=outsider))
     assert v["receipt"].error == "proof_invalid: issuer is not bound to the signing key"
+    assert p.check(attestation(r, fact_type="contract.signed"))["receipt"].error == "proof_invalid: bad signature"
 
     p.open(NET, {"scheme": "x509", "material": member("light1")})
     other = p.prove(b"light1 claim", "doc.sha256")
-    v = p.check(attestation(other, issuer=r.data["issuer"]))
+    light1_key = adapter._members[other.data["issuer"]][0]
+    v = p.check(attestation(other, signer=light1_key, issuer=r.data["issuer"]))
     assert v["receipt"].error == "proof_invalid: issuer is not bound to the signing key"
     v = p.check(attestation(r, anchor=other.state_ref))
     assert v["receipt"].error in ("proof_invalid: anchor was sent by another key",
-                                  "proof_invalid: anchor does not carry the subject hash")
+                                  "proof_invalid: anchor does not carry the statement")
 
 
 def test_query_reads_the_ledger_record(chain):
@@ -109,5 +113,5 @@ def test_query_reads_the_ledger_record(chain):
     r = p.prove(b"query me", "doc.sha256")
     q = p.check(r.state_ref)
     assert q["valid"] is True
-    assert q["receipt"].data["calldata"] == anchor_calldata(r.data["subject_hash"])
+    assert q["receipt"].data["calldata"] == anchor_calldata(statement_hash(Attestation.from_receipt(r)))
     assert q["receipt"].data["contract"] == adapter.contract

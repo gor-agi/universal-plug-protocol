@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Contributors to the Universal Plug Protocol project
 // Independent check of spec/vectors/protocol.json, written from SPEC.md with Node's standard library only.
-// Re-derives salted, bridge, and batch commitments, RFC 9162 roots and inclusion proofs, and the reserved
-// commitment domain; verifies Ed25519 and P-256 proofs and issuer binding for did:key.
+// Re-derives salted, bridge, and batch commitments, RFC 9162 roots and inclusion proofs, attestation
+// statements, and the reserved commitment domain; verifies Ed25519 and P-256 proofs over statements and
+// issuer binding for did:key.
 // Usage: node spec/vectors/verify_protocol.mjs
 import { createHash, createPublicKey, verify, ECDH } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -84,12 +85,22 @@ const publicKey = (alg, raw) => {
   return createPublicKey({ format: "jwk", key: { kty: "EC", crv: "P-256", x: b64u(xy.subarray(1, 33)), y: b64u(xy.subarray(33)) } });
 };
 
-// A proof is valid when the signature over the 32-byte subject hash verifies under the verification
+// The statement a proof signs: the subject hash with every label a verifier acts on (SPEC.md, Statement).
+const statement = (a) => ({ "plug.statement": {
+  subject_hash: a.subject_hash.toLowerCase(), hash_alg: a.hash_alg, fact_type: a.fact_type, issuer: a.issuer,
+  issued_at: a.issued_at, expires_at: a.expires_at ?? null, role: a.role ?? null,
+  meta: Object.fromEntries(Object.entries(a.meta ?? {}).filter(([k]) => !k.startsWith("_"))),
+  disclosure: a.disclosure ?? [],
+} });
+const statementHash = (a) => H(a.hash_alg, Buffer.from(canon(statement(a)), "utf8"));
+
+// A proof is valid when the signature over the 32-byte statement hash verifies under the verification
 // method's key and the issuer DID names that same key (SPEC.md, Signature suites).
-const proofValid = (subjectHash, issuer, proof) => {
+const proofValid = (att, proof) => {
   try {
-    const msg = unhex(subjectHash);
-    if (msg.length !== 32 || hex(msg) !== subjectHash.toLowerCase()) return false;
+    if (!/^[0-9a-fA-F]{64}$/.test(att.subject_hash)) return false;
+    const msg = statementHash(att);
+    const issuer = att.issuer;
     const [keyAlg, raw] = parseDidKey(proof.verification_method);
     if (keyAlg !== proof.alg) return false;
     const sig = unhex(proof.sig.replace(/^0x/, ""));
@@ -136,8 +147,14 @@ for (const v of vectors.inclusion_negative) {
   expect(!ok, `inclusion negative: ${v.case}`);
 }
 
+for (const v of vectors.statements) {
+  const a = v.attestation;
+  expect(canon(statement(a)) === v.statement, `statement ${a.hash_alg} ${a.fact_type}`);
+  expect(hex(statementHash(a)) === v.statement_hash, `statement hash ${a.hash_alg} ${a.fact_type}`);
+}
+
 for (const v of vectors.proofs) {
-  expect(proofValid(v.subject_hash, v.issuer, v.proof) === v.valid, `proof ${v.proof.alg}: ${v.case}`);
+  expect(proofValid(v.attestation, v.proof) === v.valid, `proof ${v.proof.alg}: ${v.case}`);
 }
 
 for (const v of vectors.reserved) {

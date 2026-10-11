@@ -9,7 +9,7 @@ pytest.importorskip("Crypto")
 
 from plug import suites
 from plug.adapters.oracle import OracleAdapter
-from plug.core import Attestation, FactType, Plug, sha256_hex
+from plug.core import Attestation, FactType, Plug, sha256_hex, statement_hash
 
 NET = "evidence"
 
@@ -19,11 +19,11 @@ class Party:
         self.alg, self.key = alg, suites.generate_key(alg)
         self.did = suites.sign(alg, self.key, "00" * 32)["verification_method"]
 
-    def attest(self, p, fact, fact_type, meta=None, issuer=None):
+    def attest(self, p, fact, fact_type, meta=None, issuer=None, issued_at=None):
         subject = sha256_hex(str(fact))
         att = Attestation(subject_hash=subject, fact_type=fact_type, issuer=issuer or self.did,
-                          issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                          proof=suites.sign(self.alg, self.key, subject), meta=meta or {})
+                          issued_at=issued_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), meta=meta or {})
+        att.proof = suites.sign(self.alg, self.key, statement_hash(att))
         p.attest(NET, att)
         return att
 
@@ -74,3 +74,39 @@ def test_independent_review_comes_from_another_model_family():
                              {"model_family": "family-b", "reviews": action.subject_hash})
     assert p.check(review, network=NET)["valid"] is True
     assert review.meta["model_family"] != action.meta["model_family"]
+
+
+def test_signed_labels_cannot_be_relabeled():
+    """A proof covers the statement: subject, type, issuer, times, role, meta. Changing any label voids it."""
+    from dataclasses import replace
+    p, controller, harness, reviewer = plug(), Party("ecdsa-p256"), Party(), Party()
+    controllers = {"issuers": [controller.did]}
+    halt = controller.attest(p, {"actor": "a1", "n": 1}, FactType.CONTROL_HALT)
+    as_resume = replace(halt, fact_type=FactType.CONTROL_RESUME)
+    assert p.check(as_resume, network=NET, trust_registry=controllers)["valid"] is False
+    assert halted(p, [halt, as_resume], [controller.did]) is True, "a relabeled halt cannot release the agent"
+
+    doc = harness.attest(p, {"note": "routine"}, FactType.DOC_SHA256)
+    as_action = replace(doc, fact_type=FactType.AGENT_ACTION)
+    assert p.check(as_action, network=NET, trust_registry={"issuers": [harness.did]})["valid"] is False
+
+    review = reviewer.attest(p, {"verdict": "ok"}, FactType.AGENT_REVIEW, {"model_family": "family-a"})
+    for changed in (replace(review, meta={"model_family": "family-b"}),
+                    replace(review, expires_at="2999-01-01T00:00:00Z"),
+                    replace(review, issued_at="2020-01-01T00:00:00Z")):
+        v = p.check(changed, network=NET)
+        assert v["valid"] is False and v["receipt"].error == "proof_invalid: statement does not match the anchor"
+    assert p.check(review, network=NET)["valid"] is True
+
+
+def test_reissued_signal_is_anchored_not_served_from_cache():
+    """The same halt content signed again at a later time is a new statement and must be anchored."""
+    p, controller = plug(), Party("ecdsa-p256")
+    signal = {"actor": "a1"}
+    at = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+    halt = controller.attest(p, signal, FactType.CONTROL_HALT, issued_at=at(600))
+    resume = controller.attest(p, signal, FactType.CONTROL_RESUME, issued_at=at(300))
+    halt_again = controller.attest(p, signal, FactType.CONTROL_HALT, issued_at=at(0))
+    signals = [halt, resume, halt_again]
+    assert all(p.check(s, network=NET)["valid"] for s in signals)
+    assert halted(p, signals, [controller.did]) is True

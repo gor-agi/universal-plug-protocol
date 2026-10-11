@@ -9,13 +9,15 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from itertools import count
 from unittest import mock
 
 from plug import Plug, suites
 from plug.adapters import StubAdapter
 from plug.core import (
-    StateRef, batch_commitment, bridge_commitment, canonical, commitment, digest, fact_bytes,
+    Attestation, StateRef, batch_commitment, bridge_commitment, canonical, commitment, digest, fact_bytes,
+    statement, statement_hash,
 )
 
 HASH_ALGS = ("sha-256", "sha3-256", "sm3")
@@ -93,6 +95,35 @@ def _inclusion_negative(batches: list) -> list:
     ]
 
 
+def _att_json(att: Attestation) -> dict:
+    return {"subject_hash": att.subject_hash, "hash_alg": att.hash_alg, "fact_type": att.fact_type,
+            "issuer": att.issuer, "issued_at": att.issued_at, "expires_at": att.expires_at,
+            "role": att.role.value if att.role else None, "meta": att.meta, "disclosure": att.disclosure}
+
+
+def _statements() -> list:
+    subject = digest(b"statement vectors", "sha-256")
+    atts = [
+        Attestation(subject, "doc.sha256", "did:plug:eip155:1:0x" + "11" * 20, "2026-10-11T00:00:00Z"),
+        Attestation(subject, "Agent Action", "did:key:z6MkExample", "2026-10-11T12:00:00Z",
+                    expires_at="2027-01-01T00:00:00Z", role="execution",
+                    meta={"model_family": " Family-A ", "model_id": "m-7", "tool": "email.send", "n": 3,
+                          "ratio": 0.5, "ok": True, "none": None, "nested": {"b": [1, 2], "a": "ü€"},
+                          "_seq": 9, "_internal": "excluded"}),
+        Attestation(subject, "identity.pid", "did:web:issuer.example", "2026-10-11T00:00:00+02:00",
+                    disclosure=[{"salt": "aa" * 16, "hash": "bb" * 32}], role="identity"),
+    ]
+    out = []
+    for alg in HASH_ALGS:
+        for att in atts:
+            a = Attestation(digest(b"statement vectors", alg), att.fact_type, att.issuer, att.issued_at,
+                            expires_at=att.expires_at, role=att.role, meta=dict(att.meta),
+                            disclosure=list(att.disclosure), hash_alg=alg)
+            out.append({"attestation": _att_json(a), "statement": canonical(statement(a)),
+                        "statement_hash": statement_hash(a)})
+    return out
+
+
 def _proofs() -> list:
     keys = {"ed25519": _seed("key:ed25519"), "ecdsa-p256": _seed("key:ecdsa-p256")}
     other = {"ed25519": _seed("key:ed25519:other"), "ecdsa-p256": _seed("key:ecdsa-p256:other")}
@@ -100,22 +131,32 @@ def _proofs() -> list:
     flip = lambda h: h[:-1] + ("0" if h[-1] != "0" else "1")
     out = []
     for alg in keys:
-        proof = suites.sign(alg, keys[alg], subject)
-        other_method = suites.sign(alg, other[alg], subject)["verification_method"]
+        did = suites.sign(alg, keys[alg], "00" * 32)["verification_method"]
+        other_did = suites.sign(alg, other[alg], "00" * 32)["verification_method"]
+        base = Attestation(subject, "control.halt", did, "2026-10-11T00:00:00Z",
+                           meta={"actor": "did:plug:agents:a1", "model_family": "family-a"})
+        proof = suites.sign(alg, keys[alg], statement_hash(base))
         cross = "ecdsa-p256" if alg == "ed25519" else "ed25519"
+        other_issuer = replace(base, issuer=other_did)
         cases = [
-            ("valid", subject, proof["verification_method"], proof),
-            ("issuer DID with fragment", subject, proof["verification_method"] + "#key-1", proof),
-            ("tampered subject", flip(subject), proof["verification_method"], proof),
-            ("tampered signature", subject, proof["verification_method"], dict(proof, sig=flip(proof["sig"]))),
-            ("issuer names another key", subject, other_method, proof),
-            ("alg does not match did:key type", subject, proof["verification_method"], dict(proof, alg=cross)),
-            ("subject not 32 bytes", subject[:-2], proof["verification_method"], proof),
+            ("valid", base, proof),
+            ("issuer DID with fragment", replace(base, issuer=did + "#key-1"),
+             suites.sign(alg, keys[alg], statement_hash(replace(base, issuer=did + "#key-1")))),
+            ("relabeled fact_type", replace(base, fact_type="control.resume"), proof),
+            ("relabeled meta", replace(base, meta=dict(base.meta, model_family="family-b")), proof),
+            ("relabeled issued_at", replace(base, issued_at="2020-01-01T00:00:00Z"), proof),
+            ("added expires_at", replace(base, expires_at="2999-01-01T00:00:00Z"), proof),
+            ("added role", replace(base, role="execution"), proof),
+            ("tampered subject", replace(base, subject_hash=flip(subject)), proof),
+            ("tampered signature", base, dict(proof, sig=flip(proof["sig"]))),
+            ("issuer names another key", other_issuer, suites.sign(alg, keys[alg], statement_hash(other_issuer))),
+            ("alg does not match did:key type", base, dict(proof, alg=cross)),
+            ("signed the bare subject hash", base, suites.sign(alg, keys[alg], subject)),
         ]
-        for case, subj, issuer, pr in cases:
-            ok, detail = suites.verify(subj, pr)
-            out.append({"case": case, "subject_hash": subj, "issuer": issuer, "proof": pr,
-                        "valid": bool(ok and suites.binds(issuer, detail))})
+        for case, att, pr in cases:
+            ok, detail = suites.verify(statement_hash(att), pr)
+            out.append({"case": case, "attestation": _att_json(att), "proof": pr,
+                        "valid": bool(ok and suites.binds(att.issuer, detail))})
     return out
 
 
@@ -139,7 +180,8 @@ def build() -> dict:
     batches = _batches()
     return {"description": "Protocol vectors produced by the Python reference; verify_protocol.mjs re-derives them in Node.",
             "salted": _salted(), "bridge": _bridge(), "batches": batches,
-            "inclusion_negative": _inclusion_negative(batches), "proofs": _proofs(), "reserved": _reserved()}
+            "inclusion_negative": _inclusion_negative(batches), "statements": _statements(), "proofs": _proofs(),
+            "reserved": _reserved()}
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ from typing import Any, Optional
 from ..core import (
     Attestation, PlugError, Receipt, StateRef, Status, SPEC_VERSION,
 )
-from .base import InMemoryAdapter, check_signature, fetch_registry, resolve_trust_registry
+from .base import InMemoryAdapter, anchor_error, check_signature, fetch_registry, resolve_trust_registry
 
 _DEFAULT_STATUS_LIST_POLL = 300  # 5 minutes
 
@@ -85,10 +85,9 @@ class EudiAdapter(InMemoryAdapter):
         if isinstance(trust, Receipt):
             return trust
         data = dict(trust or {})
-        if not any(r["network"] == net and r["subject_hash"] == att.subject_hash
-                   for r in self._store.values()):
-            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data,
-                           error="not_found")
+        err = anchor_error(self._store, net, att)
+        if err:
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
         # Token Status List check if a status list URL is in meta
         sl_url = att.meta.get("status_list_url")
         if sl_url:

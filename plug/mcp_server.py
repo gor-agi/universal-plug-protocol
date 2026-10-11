@@ -34,8 +34,8 @@ def receipt_json(r: Receipt) -> dict:
 def attestation_json(r: Receipt) -> dict:
     """A complete attestation from an attest receipt, ready to pass to check."""
     d = r.data
-    out = {k: d[k] for k in ("subject_hash", "fact_type", "issuer", "issued_at", "hash_alg", "proof",
-                             "inclusion") if d.get(k) is not None}
+    out = {k: d[k] for k in ("subject_hash", "fact_type", "issuer", "issued_at", "expires_at", "hash_alg",
+                             "role", "meta", "disclosure", "proof", "inclusion") if d.get(k) is not None}
     out["anchor"] = _ref_json(r.state_ref)
     return out
 
@@ -45,10 +45,10 @@ def attestation_from_json(d: dict) -> Attestation:
         anchor = StateRef(**d["anchor"]) if d.get("anchor") else None
         return Attestation(subject_hash=d["subject_hash"], fact_type=d["fact_type"], issuer=d["issuer"],
                            issued_at=d.get("issued_at", ""), expires_at=d.get("expires_at"),
-                           proof=dict(d.get("proof") or {}), meta=dict(d.get("meta") or {}),
+                           proof=dict(d.get("proof") or {}), role=d.get("role"), meta=dict(d.get("meta") or {}),
                            disclosure=list(d.get("disclosure") or []), anchor=anchor,
                            hash_alg=d.get("hash_alg", "sha-256"), inclusion=d.get("inclusion"))
-    except (KeyError, TypeError) as e:
+    except (KeyError, TypeError, ValueError) as e:
         raise PlugError("proof_invalid", f"malformed attestation: {e}") from e
 
 

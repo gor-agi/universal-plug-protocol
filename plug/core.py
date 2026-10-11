@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright Contributors to the Universal Plug Protocol project
-"""Universal Plug Protocol core v0.2.0 - network-agnostic attestation and identity interface.
+"""Universal Plug Protocol core v0.3.0 - network-agnostic attestation and identity interface.
 All network-specific logic lives in adapters. This module never imports
 network SDKs or references any specific backend.
 """
 from __future__ import annotations
-import hashlib, json, time, secrets
+import copy, hashlib, json, time, secrets
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-SPEC_VERSION = "0.2.0"
+SPEC_VERSION = "0.3.0"
 
 class Status(str, Enum):
     OK, PENDING, REJECTED, ERROR = "ok", "pending", "rejected", "error"
@@ -160,10 +160,25 @@ class Attestation:
 
     def __post_init__(self):
         self.fact_type = canon_fact_type(self.fact_type)
+        if isinstance(self.role, str) and not isinstance(self.role, Role):
+            self.role = Role(self.role)
         if self.meta.get("model_family"):
             self.meta["model_family"] = str(self.meta["model_family"]).strip().lower()
         if self.disclosure is None:
             self.disclosure = []
+
+    @classmethod
+    def from_receipt(cls, r: "Receipt") -> "Attestation":
+        """The attestation an attest receipt stands for, with every signed label, ready for check."""
+        d = r.data
+        try:
+            return cls(subject_hash=d["subject_hash"], fact_type=d["fact_type"], issuer=d["issuer"],
+                       issued_at=d.get("issued_at", ""), expires_at=d.get("expires_at"),
+                       proof=dict(d.get("proof") or {}), role=d.get("role"), meta=dict(d.get("meta") or {}),
+                       disclosure=list(d.get("disclosure") or []), anchor=r.state_ref,
+                       hash_alg=d.get("hash_alg", "sha-256"), inclusion=d.get("inclusion"))
+        except (KeyError, TypeError, ValueError) as e:
+            raise PlugError("proof_invalid", f"not an attest receipt: {e}") from e
 
 @dataclass
 class StateRef:
@@ -258,6 +273,22 @@ def batch_commitment(root: str, size: int, hash_alg: str = "sha-256") -> str:
     """Subject hash anchored for a batch: binds the RFC 9162 root and tree size under the plug.batch domain,
     so no single-fact subject can be presented as a batch root."""
     return digest(canonical({"plug.batch": {"root": root, "size": size}}).encode("utf-8"), hash_alg)
+
+
+def statement(att: "Attestation") -> dict:
+    """What a proof signs and a ledger anchors: the subject hash together with every label a verifier acts on.
+    Meta keys beginning with "_" are implementation-internal and excluded."""
+    return {"plug.statement": {
+        "subject_hash": att.subject_hash.lower(), "hash_alg": att.hash_alg, "fact_type": att.fact_type,
+        "issuer": att.issuer, "issued_at": att.issued_at, "expires_at": att.expires_at,
+        "role": att.role.value if isinstance(att.role, Role) else att.role,
+        "meta": {k: v for k, v in att.meta.items() if not str(k).startswith("_")},
+        "disclosure": list(att.disclosure or [])}}
+
+
+def statement_hash(att: "Attestation") -> str:
+    """32-byte digest of the statement under the attestation's hash_alg; signed by the proof, carried by the anchor."""
+    return digest(canonical(statement(att)).encode("utf-8"), att.hash_alg)
 
 
 _RESERVED_FACT_PREFIX = b'{"plug.'
@@ -492,8 +523,17 @@ class Plug:
     def attest(self, network: Optional[str], att: Attestation) -> Receipt:
         return self._attest(network, att)
 
-    def _attest(self, network: Optional[str], att: Attestation,
-                idem_subject: Optional[str] = None, salt: Optional[str] = None) -> Receipt:
+    @staticmethod
+    def _idempotency_key(net: str, att: Attestation, idem_subject: Optional[str], plug_time: bool) -> str:
+        """The statement as the cache sees it. A salted prove keys on the unsalted digest (memory only), and
+        when the plug chose issued_at itself the time is left out, so a retry returns the first receipt."""
+        keyed = replace(att, subject_hash=idem_subject or att.subject_hash,
+                        issued_at="" if plug_time else att.issued_at, meta=dict(att.meta))
+        return sha256_hex(canonical({"spec_version": SPEC_VERSION, "op": "attest", "network": net,
+                                     "statement": statement(keyed)}))
+
+    def _attest(self, network: Optional[str], att: Attestation, idem_subject: Optional[str] = None,
+                salt: Optional[str] = None, plug_time: bool = False) -> Receipt:
         # Explicit network beats the active session. Neither one is an error.
         net = self._resolve_network(network)
         self._adapter(net)
@@ -501,31 +541,36 @@ class Plug:
         seq = self._seq
         self._seq += 1
         # Stamp seq as internal meta for the adapter (state-ref address ordering).
-        # Does not affect receipt_hash (seq excluded from hash inputs).
+        # Internal meta is outside the statement and the cache key.
         att.meta["_seq"] = seq
         try:
             role = att.role.value if att.role else None
-            # A salted prove keys the cache on the unsalted digest (memory only) so retries do not re-anchor.
-            h = Receipt(SPEC_VERSION, "attest", Status.OK, net,
-                        data={"subject_hash": idem_subject or att.subject_hash, "fact_type": att.fact_type,
-                              "issuer": att.issuer, "role": role}).receipt_hash()
+            h = self._idempotency_key(net, att, idem_subject, plug_time)
             if h in self._idempotency:
-                # Clone cached receipt and stamp this call's fresh seq — hash invariant preserved.
+                # Clone cached receipt and stamp this call's fresh seq; seq is outside every hash.
                 cached = self._idempotency[h][0]
                 return Receipt(cached.spec_version, cached.op, cached.status, cached.network,
-                                cached.state_ref, dict(cached.data), cached.error, seq=seq)
+                               cached.state_ref, copy.deepcopy(cached.data), cached.error, seq=seq)
             r = self._adapter(net).attest(net, att)
             r.seq = seq
             r.data = dict(r.data)  # adapters may log the same dict; caller-only fields must not reach it
-            # Hash inputs travel on the receipt so receipt_hash() matches the cache key for any adapter.
+            # Hash inputs travel on the receipt so receipt_hash() can be computed for any adapter.
             r.data.setdefault("fact_type", att.fact_type)
             r.data.setdefault("issuer", att.issuer)
             r.data.setdefault("hash_alg", att.hash_alg)
             r.data.setdefault("issued_at", att.issued_at)
+            # The rest of the signed statement, so Attestation.from_receipt can rebuild it exactly.
+            r.data.setdefault("meta", copy.deepcopy({k: v for k, v in att.meta.items() if not str(k).startswith("_")}))
+            r.data.setdefault("role", role)
+            if att.expires_at:
+                r.data.setdefault("expires_at", att.expires_at)
+            if att.disclosure:
+                r.data.setdefault("disclosure", copy.deepcopy(list(att.disclosure)))
             if salt:
                 r.data["salt"] = salt
             if r.status in (Status.OK, Status.PENDING):
-                self._idempotency[h] = (r, time.time())
+                # The cache keeps its own copy: nothing the caller does to r can change a later hit.
+                self._idempotency[h] = (copy.deepcopy(r), time.time())
             # diversity tracking for prediction.market — last 20, no age cutoff.
             # The 24h gate applies only to how often the warning itself is emitted.
             if att.fact_type == FactType.PREDICTION_MARKET and att.meta.get("model_family"):
@@ -564,7 +609,9 @@ class Plug:
             return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, error=err)
         size = int(att.inclusion["size"])
         anchored = batch_commitment(root, size, att.hash_alg)
-        batch = replace(att, subject_hash=anchored, inclusion=None, meta=dict(att.meta))
+        # The signed batch statement: same issuer, time, and meta, typed plug.batch, naming the member type.
+        batch = replace(att, subject_hash=anchored, fact_type="plug.batch", inclusion=None,
+                        meta=dict(att.meta, batch_size=size, batch_fact_type=att.fact_type))
         r = self._adapter(net).verify(batch, net, trust_registry)
         data = dict(r.data, subject_hash=att.subject_hash, batch_root=root, batch_commitment=anchored,
                     leaf_index=int(att.inclusion["index"]), batch_size=size)
@@ -599,7 +646,8 @@ class Plug:
         r = self.attest(target_network, att)
         data = {"source": ref, "commitment": att.subject_hash,
                 "attestation": {"subject_hash": att.subject_hash, "fact_type": att.fact_type,
-                                "issuer": att.issuer, "issued_at": att.issued_at, "hash_alg": att.hash_alg,
+                                "issuer": att.issuer, "issued_at": r.data.get("issued_at", att.issued_at),
+                                "hash_alg": att.hash_alg, "meta": copy.deepcopy(r.data.get("meta", att.meta)),
                                 "proof": r.data.get("proof", {}),
                                 "anchor": {"network": r.state_ref.network, "address": r.state_ref.address,
                                            "kind": r.state_ref.kind} if r.state_ref else None}}
@@ -619,7 +667,7 @@ class Plug:
                           issuer=self.active().credential_subject if self.active() else "did:plug:anon",
                           issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), meta=meta or {},
                           hash_alg=self.hash_alg)
-        return self._attest(network, att, idem_subject=plain if salt else None, salt=salt)
+        return self._attest(network, att, idem_subject=plain if salt else None, salt=salt, plug_time=True)
 
     def prove_batch(self, facts: list, fact_type: str, network: Optional[str] = None,
                     meta: Optional[dict] = None) -> list[Receipt]:
@@ -651,13 +699,15 @@ class Plug:
                             fact_type="plug.batch", issuer=issuer,
                             issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                             meta=dict(meta or {}, batch_size=len(facts), batch_fact_type=ft), hash_alg=self.hash_alg)
-        r = self._attest(net, batch)
+        r = self._attest(net, batch, plug_time=True)
         if batch_key and r.status in (Status.OK, Status.PENDING):
             self._batch_salts[batch_key] = (salts, time.time())
         receipts = []
         for i, subject in enumerate(subjects):
+            signed_meta = copy.deepcopy({k: v for k, v in r.data.get("meta", batch.meta).items()
+                                         if k not in ("batch_size", "batch_fact_type") and not str(k).startswith("_")})
             data = {"subject_hash": subject, "fact_type": ft, "issuer": issuer, "hash_alg": self.hash_alg,
-                    "issued_at": r.data.get("issued_at", batch.issued_at),
+                    "issued_at": r.data.get("issued_at", batch.issued_at), "meta": signed_meta,
                     "proof": dict(r.data.get("proof") or {}), "batch_root": root,
                     "batch_commitment": batch.subject_hash,
                     "inclusion": {"tree": "rfc9162", "index": i, "size": len(subjects), "root": root,
@@ -696,7 +746,7 @@ class Plug:
         except (KeyError, TypeError):
             return verdict("proof_invalid: not a plug bridge receipt", {})
         att = Attestation(subject_hash=a["subject_hash"], fact_type=a["fact_type"], issuer=a["issuer"],
-                          issued_at=a.get("issued_at", ""),
+                          issued_at=a.get("issued_at", ""), meta=dict(a.get("meta") or {}),
                           proof=dict(a.get("proof") or {}), anchor=anchor, hash_alg=a.get("hash_alg", "sha-256"))
         if att.subject_hash != bridge_commitment(src, att.hash_alg):
             return verdict("proof_invalid: target commitment does not match the source", {"source": ref})

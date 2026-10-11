@@ -55,9 +55,10 @@ def test_prove_then_check_round_trip_and_tamper():
             att = out["attestation"]
             v = await call(client, "check", attestation=att)
             assert v["valid"] is True, v
-            att["subject_hash"] = "00" * 32
-            v = await call(client, "check", attestation=att)
-            assert v["valid"] is False
+            for field, value in (("fact_type", "agent.action"), ("meta", {"model_family": "trusted-family"}),
+                                 ("issued_at", "2020-01-01T00:00:00Z"), ("subject_hash", "00" * 32)):
+                v = await call(client, "check", attestation=dict(att, **{field: value}))
+                assert v["valid"] is False, f"relabeled {field} must not verify"
     run(go())
 
 

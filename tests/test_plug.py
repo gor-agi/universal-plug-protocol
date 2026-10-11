@@ -23,9 +23,9 @@ def test_prove_check_verify_loop():
     ref = StateRef("testnet", r1.state_ref.address, "event")
     chk = p.check(ref)
     assert chk["valid"] is True
-    att = Attestation(subject_hash=r1.data["subject_hash"], fact_type=FactType.SENSOR_READING,
-                      issuer="did:plug:testnet:alice", issued_at="2026-10-10T00:00:00Z",
-                      proof={"alg": "ecdsa-secp256k1", "sig": "0xdead", "verification_method": "0xabc"})
+    att = Attestation.from_receipt(r1)
+    assert att.issuer == "did:plug:testnet:alice"
+    att.proof = {"alg": "ecdsa-secp256k1", "sig": "0xdead", "verification_method": "0xabc"}
     v = p.check(att)
     assert v["valid"] is False
     assert "unverifiable" in (v["receipt"].error or "")
@@ -136,7 +136,7 @@ def test_prove_hashes_raw_bytes():
 def test_spec_version_matches_package():
     from plug import __version__
     from plug.core import SPEC_VERSION
-    assert SPEC_VERSION == "0.2.0" == __version__
+    assert SPEC_VERSION == "0.3.0" == __version__
 
 def test_seq_cleared_when_attest_fails():
     class Boom(StubAdapter):
@@ -207,9 +207,9 @@ def test_trust_registry_passthrough():
     p = setup()
     r = p.prove("x", FactType.SENSOR_READING)
     issuer = "did:plug:testnet:alice"
-    att = Attestation(subject_hash=r.data["subject_hash"], fact_type=FactType.SENSOR_READING,
-                      issuer=issuer, issued_at="2026-10-10T00:00:00Z",
-                      proof={"alg": "ecdsa-secp256k1", "sig": "0xdead", "verification_method": "0xabc"})
+    att = Attestation.from_receipt(r)
+    assert att.issuer == issuer
+    att.proof = {"alg": "ecdsa-secp256k1", "sig": "0xdead", "verification_method": "0xabc"}
     docs = {
         "/ok.json": {"issuers": [issuer, "did:plug:testnet:bob"]},
         "/other.json": {"issuers": ["did:plug:testnet:bob"]},
@@ -283,9 +283,8 @@ def test_monoculture_window_keeps_aged_events():
 
 def test_idempotency_eviction():
     p = setup()
-    r = p.prove("x", FactType.SENSOR_READING)
-    h = r.receipt_hash()
-    assert h in p.idempotency_keys()
+    p.prove("x", FactType.SENSOR_READING)
+    (h,) = p.idempotency_keys()
     # TTL testing requires injecting a stale timestamp; no public hook for that.
     rec, _ = p._idempotency[h]
     p._idempotency[h] = (rec, time.time() - 90000)

@@ -2,6 +2,7 @@
 # Copyright Contributors to the Universal Plug Protocol project
 """Batch anchoring: RFC 9162 tree against independent reference vectors, and end to end."""
 import json
+from dataclasses import replace
 import os
 
 import pytest
@@ -89,15 +90,12 @@ def test_batch_on_ledger_adapter_verifies_every_member():
     p.open("sepolia", {"scheme": "raw", "material": Account.create().key.hex()})
     receipts = p.prove_batch([f"container-{i}" for i in range(7)], "doc.sha256")
     for r in receipts:
-        att = Attestation(r.data["subject_hash"], r.data["fact_type"], r.data["issuer"], "2026-10-11T00:00:00Z",
-                          proof=r.data["proof"], inclusion=r.data["inclusion"], anchor=r.state_ref)
-        v = p.check(att)
+        v = p.check(Attestation.from_receipt(r))
         assert v["valid"] is True, v["receipt"].error
     forged = dict(receipts[2].data["inclusion"], path=list(reversed(receipts[2].data["inclusion"]["path"])))
-    att = Attestation(receipts[2].data["subject_hash"], "doc.sha256", receipts[2].data["issuer"],
-                      "2026-10-11T00:00:00Z", proof=receipts[2].data["proof"], inclusion=forged,
-                      anchor=receipts[2].state_ref)
-    assert p.check(att)["valid"] is False
+    assert p.check(_att(receipts[2], inclusion=forged))["valid"] is False
+    relabeled = p.check(_att(receipts[2], fact_type="contract.signed"))
+    assert relabeled["valid"] is False, "a batch member's type is signed through the batch statement"
 
 
 def _ledger_plug(**kw):
@@ -112,11 +110,7 @@ def _ledger_plug(**kw):
 
 
 def _att(r, **over):
-    d = dict(subject_hash=r.data["subject_hash"], fact_type=r.data["fact_type"], issuer=r.data["issuer"],
-             issued_at="2026-10-11T00:00:00Z", proof=r.data["proof"], inclusion=r.data.get("inclusion"),
-             anchor=r.state_ref)
-    d.update(over)
-    return Attestation(**d)
+    return replace(Attestation.from_receipt(r), **over)
 
 
 def test_single_fact_anchor_cannot_pose_as_a_batch_root():
@@ -158,3 +152,30 @@ def test_reserved_plug_domain_cannot_be_proven():
         with pytest.raises(PlugError):
             p.prove_batch(["ok", fact], "doc.sha256")
     assert p.prove({"plugin": "fine"}, "doc.sha256").status == Status.OK
+
+
+def test_repeated_batch_with_other_type_or_meta_is_its_own_statement():
+    p = _ledger_plug()
+    calls = [(["x", "y"], "doc.sha256", None), (["x", "y"], "contract.signed", None),
+             (["x", "y"], "doc.sha256", {"k": 1}), (["x", "y"], "doc.sha256", {"k": 2}),
+             (["x", "y"], "doc.sha256", {"k": 2})]
+    anchors = []
+    for facts, ft, meta in calls:
+        receipts = p.prove_batch(facts, ft, meta=meta)
+        anchors.append(receipts[0].state_ref.address)
+        for r in receipts:
+            v = p.check(Attestation.from_receipt(r))
+            assert v["valid"] is True, (ft, meta, v["receipt"].error)
+    assert len(set(anchors[:4])) == 4 and anchors[4] == anchors[3], "only an identical retry reuses the anchor"
+
+
+def test_receipts_do_not_share_signed_meta_with_the_caller_or_the_cache():
+    p = _ledger_plug()
+    meta = {"tags": ["a"]}
+    first = p.prove("doc-1", "doc.sha256", meta=meta)
+    meta["tags"].append("b")
+    first.data["meta"]["tags"].append("c")
+    retry = p.prove("doc-1", "doc.sha256", meta={"tags": ["a"]})
+    assert retry.state_ref == first.state_ref
+    assert p.check(Attestation.from_receipt(retry))["valid"] is True
+

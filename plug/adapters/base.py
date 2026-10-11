@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 from ..core import (
     Adapter, Attestation, Identity, PlugError, Receipt, SPEC_VERSION, StateRef, Status,
-    parse_time, sha256_hex,
+    parse_time, sha256_hex, statement_hash,
 )
 
 _REGISTRY_TIMEOUT = 5
@@ -121,7 +121,7 @@ class InMemoryAdapter(LoggingAdapter, Adapter):
         seq = att.meta.get("_seq", 0)
         tx = f"{self.tx_prefix}:0x" + sha256_hex(f"{net}:{att.subject_hash}:{att.issuer}:{seq}")
         rec = {"op": "attest", "tx": tx, "block": 9000000 + len(self._store),
-               "subject_hash": att.subject_hash, "fact_type": att.fact_type,
+               "subject_hash": att.subject_hash, "statement_hash": statement_hash(att), "fact_type": att.fact_type,
                "issuer": att.issuer,
                "role": att.role.value if att.role else None, "seq": seq, "network": net}
         self._store[tx] = rec
@@ -142,10 +142,9 @@ class InMemoryAdapter(LoggingAdapter, Adapter):
         if isinstance(trust, Receipt):
             return trust
         data = dict(trust or {})
-        if not any(r["network"] == net and r["subject_hash"] == att.subject_hash
-                   for r in self._store.values()):
-            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data,
-                           error="not_found")
+        err = anchor_error(self._store, net, att)
+        if err:
+            return Receipt(SPEC_VERSION, "verify", Status.REJECTED, net, data=data, error=err)
         return check_signature(att, net, data)
 
     def settle(self, network: str, op: str, payload: dict) -> Receipt:
@@ -172,6 +171,17 @@ class InMemoryAdapter(LoggingAdapter, Adapter):
         for rec in list(self.log):
             self._deliver(handle, ref, selected, rec)
         return handle
+
+
+def anchor_error(store: dict, network: str, att) -> Optional[str]:
+    """None when an in-memory record on this network carries exactly this attestation's statement."""
+    sh = statement_hash(att)
+    here = [r for r in store.values() if r.get("network") == network]
+    if any(r.get("statement_hash") == sh for r in here):
+        return None
+    if any(r.get("subject_hash") == att.subject_hash for r in here):
+        return "proof_invalid: statement does not match the anchor"
+    return "not_found"
 
 
 class _RegistryRedirect(urllib.request.HTTPRedirectHandler):
@@ -295,7 +305,7 @@ def check_signature(att, network: str, data: dict) -> Receipt:
     if alg == "signature" or not (resolvable or has_keys):
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data,
                        error="proof_invalid: unverifiable")
-    ok, detail = verify(att.subject_hash, att.proof)
+    ok, detail = verify(statement_hash(att), att.proof)
     if not ok:
         return Receipt(SPEC_VERSION, "verify", Status.REJECTED, network, data=data, error=detail)
     if resolvable and not binds(att.issuer, detail):

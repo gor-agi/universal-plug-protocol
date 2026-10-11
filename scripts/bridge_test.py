@@ -50,8 +50,7 @@ def main():
     p.open("chainmaker", {"scheme": "x509", "material": member("client1")})
     src = p.prove({"certificate_of_origin": "CO-2026-0042", "hs_code": "7403.11"}, "doc.sha256")
     print(f"source attest:      {src.status.value} {src.state_ref.address} block {src.data['block']}")
-    att = Attestation(src.data["subject_hash"], src.data["fact_type"], src.data["issuer"],
-                      "2026-10-11T00:00:00Z", proof=src.data["proof"], anchor=src.state_ref)
+    att = Attestation.from_receipt(src)
     v = p.check(att)
     print(f"source check:       {v['valid']} org {v['receipt'].data.get('org_id')} finality {v['receipt'].data.get('finality')}")
 

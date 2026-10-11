@@ -2,7 +2,7 @@
 # Copyright Contributors to the Universal Plug Protocol project
 """OracleAdapter and EudiAdapter tests - in-memory, no network. Public surfaces only."""
 import time
-from plug.core import (Plug, Attestation, Identity, StateRef, Status, Role, FactType,
+from plug.core import (Plug, Attestation, Identity, StateRef, Status, Role, FactType, statement_hash,
                   PlugError, sha256_hex)
 from plug.adapters.oracle import OracleAdapter
 from plug.adapters.eudi import EudiAdapter
@@ -153,15 +153,18 @@ def test_eudi_trusted_list_resolution():
 
 def test_eudi_status_list_revocation():
     p = setup_eudi()
-    r = p.prove("x", FactType.SENSOR_READING)
-    att = Attestation(subject_hash=r.data["subject_hash"], fact_type=FactType.SENSOR_READING,
-                      issuer="did:eudi:eudi:alice", issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                      proof={"alg": "signature", "sig": "0x1", "verification_method": "0x2"},
-                      meta={"status_list_url": "http://127.0.0.1:1/status.json", "status_list_index": 0})
+    r = p.prove("x", FactType.SENSOR_READING,
+                meta={"status_list_url": "http://127.0.0.1:1/status.json", "status_list_index": 0})
+    att = Attestation.from_receipt(r)
+    att.proof = {"alg": "signature", "sig": "0x1", "verification_method": "0x2"}
     # unreachable status list with no cached copy -> fail closed before the signature check
     v = p.check(att)
     assert v["valid"] is False
     assert "status list unreachable" in (v["receipt"].error or "")
+    # the status list reference is signed meta: stripping it does not skip the revocation check
+    stripped = Attestation.from_receipt(r)
+    stripped.meta = {}
+    assert p.check(stripped)["receipt"].error == "proof_invalid: statement does not match the anchor"
 
 
 def test_eudi_subscribe_delivers():
@@ -176,20 +179,21 @@ def _signed(p, network, alg, key, fact):
     import pytest
     from plug import suites
     try:
-        proof = suites.sign(alg, key(), sha256_hex(fact))
+        k = key()
+        issuer = suites.sign(alg, k, "00" * 32)["verification_method"]
     except PlugError:
         pytest.skip(f"{alg} library not installed")
-    att = Attestation(subject_hash=sha256_hex(fact), fact_type=FactType.DOC_SHA256,
-                      issuer=proof["verification_method"],
-                      issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), proof=proof)
+    att = Attestation(subject_hash=sha256_hex(fact), fact_type=FactType.DOC_SHA256, issuer=issuer,
+                      issued_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    att.proof = suites.sign(alg, k, statement_hash(att))
     assert p.attest(network, att).status == Status.OK
-    return att
+    return att, k
 
 
 def test_eudi_verifies_es256_did_key_issuer():
     from plug import suites
     p = setup_eudi()
-    att = _signed(p, "eudi", "ecdsa-p256", lambda: suites.generate_key("ecdsa-p256"), "pid-credential")
+    att, _ = _signed(p, "eudi", "ecdsa-p256", lambda: suites.generate_key("ecdsa-p256"), "pid-credential")
     v = p.check(att, network="eudi", trust_registry={"issuers": [att.issuer]})
     assert v["valid"] is True, v["receipt"].error
     assert v["receipt"].data["verification_method"] == att.issuer
@@ -198,10 +202,14 @@ def test_eudi_verifies_es256_did_key_issuer():
 def test_oracle_verifies_sm2_and_rejects_impersonation():
     from plug import suites
     p = setup_oracle()
-    att = _signed(p, "oracle", "sm2-sm3", lambda: suites.generate_key("sm2-sm3"), "cold-chain 4.1C")
+    att, key = _signed(p, "oracle", "sm2-sm3", lambda: suites.generate_key("sm2-sm3"), "cold-chain 4.1C")
     assert p.check(att, network="oracle")["valid"] is True
-    other = suites.sign("sm2-sm3", suites.generate_key("sm2-sm3"), att.subject_hash)["verification_method"]
-    forged = Attestation(att.subject_hash, att.fact_type, other, att.issued_at, proof=att.proof)
+    other = suites.sign("sm2-sm3", suites.generate_key("sm2-sm3"), "00" * 32)["verification_method"]
+    relabeled = Attestation(att.subject_hash, att.fact_type, other, att.issued_at, proof=att.proof)
+    assert p.check(relabeled, network="oracle")["receipt"].error == "proof_invalid: statement does not match the anchor"
+    forged = Attestation(att.subject_hash, att.fact_type, other, att.issued_at)
+    forged.proof = suites.sign("sm2-sm3", key, statement_hash(forged))  # signed, but by a key `other` does not name
+    p.attest("oracle", forged)
     v = p.check(forged, network="oracle")
     assert v["valid"] is False
     assert v["receipt"].error == "proof_invalid: issuer is not bound to the signing key"
