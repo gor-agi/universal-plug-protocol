@@ -107,12 +107,17 @@ def test_ledger_judges_the_key_at_anchored_time():
 
 
 def _set_anchored_at(path, when):
+    """Rewrite the log as if it had been written at `when`: a fresh, valid hash chain (as its keeper could)."""
+    from upp import canonical
+    from upp.ledgers.local import GENESIS
     with open(path, encoding="utf-8") as f:
         recs = [json.loads(line) for line in f if line.strip()]
+    prev = GENESIS
     for rec in recs:
-        rec["anchored_at"] = when
+        rec.update(anchored_at=when, prev=prev)
+        prev = sha256_hex(canonical(rec))
     with open(path, "w", encoding="utf-8") as f:
-        f.writelines(json.dumps(rec, sort_keys=True) + "\n" for rec in recs)
+        f.writelines(canonical(rec) + "\n" for rec in recs)
 
 
 def test_key_revoked_after_anchoring_still_verifies(ledger_path):

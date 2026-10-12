@@ -6,7 +6,7 @@ Status: the security problem definitions behind 0.3–0.6. It defines, per compo
 
 - **Issuer**: holds a signing key; proves facts. Trusted only for what it signs.
 - **Verifier**: runs `check`. Trusts its own code, its configured trust registries, and its view of each network. Trusts nothing in the attestation.
-- **Ledgers**: a local log, Ethereum, ChainMaker. A verifier trusts the node or endpoints it reads a ledger from, and the keeper of a local log for its clock (see SPEC, Ledgers).
+- **Ledgers**: a local log, Ethereum, ChainMaker. A verifier trusts the node or endpoints it reads a ledger from, and the keeper of a local log for its clock and for not rewriting the whole hash chain since its last published head (see SPEC, Ledgers).
 - **MCP server**: exposes prove and check to an AI model. The model is untrusted: it is a potentially compromised insider (SPEC, agent oversight profile). Keys, registries, and policy belong to the operator.
 - **Remote documents**: trust registries, trusted lists, and status lists are fetched over HTTP from URLs that operators configure or credentials name. Their content and their hosts are attacker-influenced.
 

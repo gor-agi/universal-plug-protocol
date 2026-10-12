@@ -39,7 +39,7 @@ def ledger_path():
 # ---- version, canonical form, digests ----
 
 def test_spec_version_matches_package():
-    assert upp.SPEC_VERSION == "0.6.0"
+    assert upp.SPEC_VERSION == "0.6.1"
     assert upp.__version__.startswith(upp.SPEC_VERSION)
 
 

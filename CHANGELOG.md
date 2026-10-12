@@ -2,6 +2,27 @@
 
 All notable changes to the specification and the reference implementation. Versions follow [SPEC.md](SPEC.md).
 
+## 0.6.1
+
+### Security
+
+- **`LocalLedger` log is hash-chained** (found in review of 0.6.0: anyone able to write the log file could append a
+  backdated record, so a statement signed with a key revoked later would pass the registry key window). Each record
+  now carries `seq` and `prev` (the hash of the previous record), and its time is never earlier than the previous
+  record's; readers stop at the first record that does not follow, and nothing is appended to a broken log. Writers
+  take an exclusive file lock, so processes can share one log. `LocalLedger.head()` returns the latest `seq` and hash
+  for publishing as a checkpoint. Logs written by 0.6.0 are not readable by 0.6.1.
+- **Log keeper** (found in review of the above: an unsigned chain still lets anyone who can append write a valid
+  next record, dated as early as the last one). `LocalLedger(path, keeper=signer)` signs every record it appends;
+  `LocalLedger(path, keeper="did:key:...")` reads only records that key signed and never appends. Without a keeper,
+  anyone who can write the file is effectively its keeper, as documented.
+- A record whose canonical form cannot be computed (a lone surrogate, extreme nesting) now breaks the chain; before
+  this fix it could be half-accepted and verify on a second check in the same process.
+
+### Changed
+
+- CI runs on pinned `ubuntu-24.04` with current (Node 24) actions; Dependabot watches actions and pip dependencies.
+
 ## 0.6.0
 
 ### Breaking: renamed and simplified

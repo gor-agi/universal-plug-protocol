@@ -25,8 +25,13 @@ reports of how this project uses them are in scope.
 
 - **No external audit yet.** The code has had repeated internal reviews and third-party test vectors, not an
   independent audit.
-- **Local ledger time.** `LocalLedger` records its own clock as the anchoring time. It proves order and integrity to
-  whoever trusts the log's keeper; use a public or permissioned ledger when a third party must not.
+- **Local ledger trust.** `LocalLedger`'s log is hash-chained, so inserting, editing, reordering, or backdating a
+  record invalidates everything after it. Without `keeper=`, anyone who can write the file can append a record dated
+  no earlier than the last one; with it, only the keeper's key can add records. The keeper can still rewrite the
+  whole file and choose the clock: publish
+  `head()` somewhere they cannot change (for example, prove it on a public ledger) to pin history, or use a public or
+  permissioned ledger when a third party must not trust the keeper. On Windows, where file locks are not used, give
+  each log file one writing process.
 - **SM2 signing.** The `sm2-sm3` suite uses a pure-Python library that is not constant-time. Verification is
   unaffected; do not sign with SM2 on hosts exposed to timing measurement.
 - **Ledger finality and reads.** Verification reports finality; it does not wait for it. A ledger with one read

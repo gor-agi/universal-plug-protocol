@@ -1,6 +1,6 @@
 # Universal Plug Protocol Specification
 
-Version 0.6.0
+Version 0.6.1
 
 UPP makes a fact checkable by anyone: an issuer **proves** it (signs a statement about its hash and anchors it on a
 ledger), and anyone **checks** it later without trusting the issuer, the ledger operator, or the software that made
@@ -119,12 +119,22 @@ A ledger implements `connect(network, auth) → {subject}`, `bind(subject)`, `at
 
 | Ledger | Issuer | Anchor | Anchoring time |
 | --- | --- | --- | --- |
-| `LocalLedger` | did:key of the session key (Ed25519 by default; any suite, or a PKCS#11 HSM) | append-only log, in memory or a JSONL file | the log keeper's clock |
+| `LocalLedger` | did:key of the session key (Ed25519 by default; any suite, or a PKCS#11 HSM) | hash-chained append-only log, in memory or a JSONL file | the writers' clock, never earlier than the previous record |
 | `EthereumLedger` | `did:pkh:eip155:<chain>:<address>` | 0-wei self-transaction carrying the statement hash | block timestamp |
 | `ChainMakerLedger` | did:key of the member's P-256 certificate key | call to a STOP-only anchor contract | block timestamp |
 
-A local log proves order and integrity to whoever trusts its keeper; a public or permissioned ledger removes that
-trust. A verifier that needs more assurance reads a ledger from several independent endpoints and requires them to
+**Local log.** Each line is the RFC 8785 form of `{network, statement_hash, subject_hash, issuer, anchored_at, seq,
+prev}`, where `seq` counts from 0, `prev` is the SHA-256 of the previous line's canonical form (64 zeros for the
+first), and `anchored_at` is never earlier than the previous record's. A reader accepts records only up to the first
+line that does not follow (including any line whose canonical form cannot be computed), so an inserted, edited,
+reordered, or backdated line invalidates everything after it, and writers append under an exclusive file lock. A log
+with a **keeper** carries `keeper_proof` in every record: a proof by the keeper's did:key over the SHA-256 of the
+record without it. Readers configured with that keeper accept only records it signed, so neither write access to the
+file nor a stolen issuer key lets anyone add a record. Without a keeper, anyone who can write the file can append a
+record dated no earlier than the last one. A local log proves order and integrity to whoever trusts its keeper, who
+could still rewrite the whole file: publishing `head()` (the last `seq` and record hash) where the keeper cannot
+change it, such as a proof on a public ledger, pins the history up to that point. A public or permissioned ledger
+removes the trust. A verifier that needs more assurance reads a ledger from several independent endpoints and requires them to
 agree (`EthereumLedger(read_urls=[...])`).
 
 ## Grants profile: on whose behalf

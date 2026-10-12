@@ -16,7 +16,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
-SPEC_VERSION = "0.6.0"
+SPEC_VERSION = "0.6.1"
 
 # The one explicit way to open a permission (trust any authentic issuer, fetch from any public host, let a model
 # prove any non-reserved fact type). Never a default; every use is logged on "upp.policy".
